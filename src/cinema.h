@@ -26,7 +26,7 @@ struct global
     msd_t msd;
 };
 
-enum { USB_RETRY_INIT = USB_USER_ERROR };
+#define USB_RETRY_INIT ((usb_error_t)USB_USER_ERROR)
 
 /* Prints str followed by a newline via the OS text routines. */
 void putstr(const char *str);

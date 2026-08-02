@@ -55,12 +55,15 @@ bool cin2_parse_header(const uint8_t *raw, cin2_header_t *out)
 {
     uint32_t stored_crc;
     uint32_t computed_crc;
-    uint8_t i;
+    uint16_t i;
 
     if (!cin2_has_magic(raw)) {
         return false;
     }
     if (raw[4] != CIN2_VERSION) {
+        return false;
+    }
+    if (raw[5] != 0) {
         return false;
     }
 
@@ -83,8 +86,41 @@ bool cin2_parse_header(const uint8_t *raw, cin2_header_t *out)
     for (i = 0; i < 16; ++i) {
         out->palette[i] = read_u16le(raw + 26 + i * 2);
     }
-
+    out->title[0] = 0;
+    out->chapter_count = 0;
+    if (memcmp(raw + 58, "C2MD", 4) == 0) {
+        uint8_t title_len = raw[63];
+        uint8_t count = raw[64];
+        uint32_t stored_meta_crc = read_u32le(raw + 402);
+        if (raw[62] != 1 || raw[65] != 0 || title_len > CIN2_TITLE_MAX
+            || count > CIN2_CHAPTER_MAX
+            || stored_meta_crc != cin2_crc32(raw + 58, 344)) return false;
+        memcpy(out->title, raw + 66, title_len);
+        out->title[title_len] = 0;
+        out->chapter_count = count;
+        for (i = 0; i < count; ++i) {
+            uint16_t off = (uint16_t)(114 + i * 24);
+            uint8_t len = raw[off + 4];
+            if (len > CIN2_CHAPTER_NAME_MAX) return false;
+            out->chapters[i].frame = read_u32le(raw + off);
+            if (out->chapters[i].frame >= out->frame_count) return false;
+            memcpy(out->chapters[i].name, raw + off + 5, len);
+            out->chapters[i].name[len] = 0;
+        }
+        for (i = 406; i < CIN2_HEADER_BYTES; ++i) if (raw[i] != 0) return false;
+    } else {
+        for (i = 58; i < CIN2_HEADER_BYTES; ++i) if (raw[i] != 0) return false;
+    }
     return true;
+}
+
+bool cin2_stream_fits(uint32_t frame_count, uint32_t drive_blocks)
+{
+    if (frame_count == 0 || drive_blocks <= CIN2_DATA_LBA) {
+        return false;
+    }
+    return frame_count <=
+        (drive_blocks - CIN2_DATA_LBA) / CIN2_FRAME_SECTORS;
 }
 
 void cin2_build_header(uint8_t *raw, const cin2_header_t *header)
@@ -102,8 +138,21 @@ void cin2_build_header(uint8_t *raw, const cin2_header_t *header)
     write_u32le(raw + 18, header->frame_count);
     write_u32le(raw + 22, cin2_crc32(raw, CIN2_CRC_BYTES));
 
-    for (i = 0; i < 16; ++i) {
-        write_u16le(raw + 26 + i * 2, header->palette[i]);
+    for (i = 0; i < 16; ++i) write_u16le(raw + 26 + i * 2, header->palette[i]);
+    if (header->title[0] || header->chapter_count) {
+        uint8_t title_len = (uint8_t)strlen(header->title);
+        if (title_len > CIN2_TITLE_MAX) title_len = CIN2_TITLE_MAX;
+        memcpy(raw + 58, "C2MD", 4); raw[62] = 1; raw[63] = title_len;
+        raw[64] = header->chapter_count <= CIN2_CHAPTER_MAX ? header->chapter_count : CIN2_CHAPTER_MAX;
+        memcpy(raw + 66, header->title, title_len);
+        for (i = 0; i < raw[64]; ++i) {
+            uint16_t off = (uint16_t)(114 + i * 24);
+            uint8_t len = (uint8_t)strlen(header->chapters[i].name);
+            if (len > CIN2_CHAPTER_NAME_MAX) len = CIN2_CHAPTER_NAME_MAX;
+            write_u32le(raw + off, header->chapters[i].frame); raw[off + 4] = len;
+            memcpy(raw + off + 5, header->chapters[i].name, len);
+        }
+        write_u32le(raw + 402, cin2_crc32(raw + 58, 344));
     }
 }
 
@@ -126,6 +175,9 @@ bool cin2_parse_resume_record(const uint8_t *raw, cin2_resume_t *out)
         return false;
     }
     if (raw[4] != CIN2_VERSION) {
+        return false;
+    }
+    if (raw[5] != 0) {
         return false;
     }
 

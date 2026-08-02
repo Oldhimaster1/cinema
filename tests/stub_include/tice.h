@@ -12,8 +12,10 @@
 #include <stdint.h>
 #include <time.h>
 
+#define sk_Down    0x01
 #define sk_Left    0x02
 #define sk_Right   0x03
+#define sk_Up      0x04
 #define sk_Clear   0x0F
 #define sk_0       0x21
 #define sk_2nd     0x36

@@ -32,3 +32,5 @@ void cinema_draw_packed4_scaled2x(const uint8_t *packed,
                                    uint16_t y_offset);
 
 #endif
+void cinema_draw_packed4_original(const uint8_t *packed, uint8_t *framebuffer, uint16_t stride);
+void cinema_draw_packed4_stretch(const uint8_t *packed, uint8_t *framebuffer, uint16_t stride);

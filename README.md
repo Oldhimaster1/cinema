@@ -88,3 +88,13 @@ pillow pytest numpy` first).
 
 - [FBin GitHub Repository](https://github.com/will-dabeast09/fbin) (v1 encoder)
 - [HDD Raw Copy Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/)
+
+### Cinema v2 player controls
+
+- **2nd:** Play or pause
+- **Left/Right:** Seek using the configured interval
+- **Mode:** Show or hide the playback dashboard
+- **Del:** Open the player menu
+- **Clear:** Exit and save the resume position
+
+The player menu provides movie information, chapters, eight persistent bookmarks, scaling modes, settings, restart, and return to playback. Optional CRC-protected C2MD metadata stores a title and up to twelve chapters without moving frame data from LBA 1.

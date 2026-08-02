@@ -48,14 +48,14 @@ test_decode_and_cin2() {
 
 test_structural_link() {
     $CC $STUB_CFLAGS \
-        src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c src/decode.c \
+        src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c src/decode.c src/ui.c src/settings.c src/bookmarks.c \
         tests/stub_impl.c -o "$TMP/cinema_stub_link"
     "$TMP/cinema_stub_link"
 }
 
 test_player_v2_sim() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
-        src/player_v2.c src/decode.c src/cin2.c src/msd_util.c \
+        src/player_v2.c src/decode.c src/cin2.c src/msd_util.c src/ui.c src/settings.c src/bookmarks.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim.c -o "$TMP/test_player_v2_sim"
     timeout 30 "$TMP/test_player_v2_sim"
 }
@@ -65,6 +65,16 @@ test_player_v1_sim() {
         src/player_v1.c src/msd_util.c \
         tests/stub_impl_v1_sim.c tests/test_player_v1_sim.c -o "$TMP/test_player_v1_sim"
     timeout 30 "$TMP/test_player_v1_sim"
+}
+
+test_features() {
+    $CC $CFLAGS -Isrc -o "$TMP/test_features" tests/test_features.c src/decode.c src/cin2.c src/ui.c
+    "$TMP/test_features"
+}
+
+test_persistence() {
+    $CC $STUB_CFLAGS -o "$TMP/test_persistence" tests/test_persistence.c src/settings.c src/bookmarks.c src/cin2.c tests/stub_impl_sim.c
+    "$TMP/test_persistence"
 }
 
 test_encoder() {
@@ -79,6 +89,8 @@ run_step "decode.c / cin2.c host unit tests"        test_decode_and_cin2
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim
 run_step "player_v1 end-to-end simulation"           test_player_v1_sim
+run_step "feature metadata/UI/scaling tests" test_features
+run_step "settings/bookmark persistence tests" test_persistence
 run_step "Python encoder tests"                      test_encoder
 
 echo

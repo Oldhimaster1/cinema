@@ -15,6 +15,11 @@
 #define CIN2_CRC_BYTES     22  /* bytes [0, 22) covered by header_crc32 */
 #define CIN2_DATA_LBA      1
 #define CIN2_FRAME_SECTORS 15
+#define CIN2_TITLE_MAX 48
+#define CIN2_CHAPTER_MAX 12
+#define CIN2_CHAPTER_NAME_MAX 19
+
+typedef struct { uint32_t frame; char name[CIN2_CHAPTER_NAME_MAX + 1]; } cin2_chapter_t;
 
 typedef struct {
     uint16_t width;
@@ -23,6 +28,9 @@ typedef struct {
     uint32_t fps_den;
     uint32_t frame_count;
     uint16_t palette[16]; /* raw RGB565, ready for gfx_SetPalette */
+    char title[CIN2_TITLE_MAX + 1];
+    uint8_t chapter_count;
+    cin2_chapter_t chapters[CIN2_CHAPTER_MAX];
 } cin2_header_t;
 
 /* Cheap check: true if raw[0..3] == "CIN2". Used to distinguish a v2
@@ -50,6 +58,10 @@ static inline uint32_t cin2_frame_lba(uint32_t frame_number)
 /* Standard CRC-32 (IEEE 802.3): poly 0xEDB88320, init/final XOR
  * 0xFFFFFFFF -- the zlib/gzip/PNG variant. */
 uint32_t cin2_crc32(const uint8_t *data, uint32_t length);
+/* Returns true when every frame lies within a drive of drive_blocks
+ * 512-byte sectors, without overflowing the LBA arithmetic. */
+bool cin2_stream_fits(uint32_t frame_count, uint32_t drive_blocks);
+
 
 /* Resume record (AppVar SSCINEV2), see docs/CIN2_FORMAT.md. */
 #define CIN2_RESUME_BYTES 20

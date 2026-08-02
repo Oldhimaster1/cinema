@@ -119,3 +119,6 @@ final XOR `0xFFFFFFFF` -- the same variant used by zlib/gzip/PNG. Both
 `tools/cin2_format.py` and `src/cin2.c` implement it independently from
 this spec; `tests/test_cin2_format.py` checks them against known test
 vectors.
+### Optional C2MD metadata extension (v2-compatible)
+
+Bytes 58..405 may contain an optional, explicitly identified metadata block while frame data remains at LBA 1. A zero-filled region remains valid. The extension uses: `C2MD` at 58, extension version 1 at 62, title length at 63, chapter count at 64, flags=0 at 65, a 48-byte ASCII title at 66, up to twelve 24-byte chapter records at 114 (u32 frame, u8 name length, 19-byte ASCII name), and CRC-32 over bytes 58..401 stored at 402. Bytes 406..511 remain zero. This preserves the frame-LBA formula and old CIN2 files.

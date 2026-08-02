@@ -86,7 +86,7 @@ def build_global_palette(frames: Sequence[Image.Image], sample_count: int) -> Im
         y = (i // cols) * tile_h
         sheet.paste(img.convert("RGB"), (x, y))
 
-    return sheet.quantize(colors=fmt.PALETTE_ENTRIES, method=Image.Quantize.MEDIANCUT)
+    return sheet.quantize(colors=fmt.PALETTE_ENTRIES, method=getattr(Image, "Quantize", Image).MEDIANCUT)
 
 
 def palette_image_to_rgb565(palette_image: Image.Image) -> list[int]:
@@ -110,8 +110,8 @@ def quantize_frame(image: Image.Image, palette_image: Image.Image) -> list[int]:
     WIDTH*HEIGHT indices (0..15), row-major top-to-bottom."""
     rgb = image.convert("RGB")
     if rgb.size != (fmt.WIDTH, fmt.HEIGHT):
-        rgb = rgb.resize((fmt.WIDTH, fmt.HEIGHT), Image.Resampling.LANCZOS)
-    quantized = rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
+        rgb = rgb.resize((fmt.WIDTH, fmt.HEIGHT), getattr(Image, "Resampling", Image).LANCZOS)
+    quantized = rgb.quantize(palette=palette_image, dither=getattr(Image, "Dither", Image).FLOYDSTEINBERG)
     indices = list(quantized.tobytes())
     # Floyd-Steinberg dithering with a quantize()-supplied palette can
     # occasionally emit an index past the palette's actual (possibly

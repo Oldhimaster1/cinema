@@ -1,409 +1,60 @@
 #include "player_v2.h"
 #include "decode.h"
 #include "msd_util.h"
-
+#include "ui.h"
+#include "settings.h"
+#include "bookmarks.h"
 #include <fileioc.h>
 #include <graphx.h>
 #include <msddrvce.h>
 #include <tice.h>
 #include <usbdrvce.h>
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-
 #define SLOT_COUNT 4
+#define V2_Y_OFFSET 24
+#define MENU_COUNT 7
 
-/* 4 slots * 1/24s per frame = ~166ms of read-ahead buffer. */
-
-#define V2_Y_OFFSET ((GFX_LCD_HEIGHT - CINEMA_V2_DEST_HEIGHT) / 2)
-
-typedef enum {
-    SLOT_EMPTY,
-    SLOT_LOADING,
-    SLOT_READY,
-    SLOT_ERROR
-} slot_state_t;
-
+typedef enum { SLOT_EMPTY,SLOT_LOADING,SLOT_READY,SLOT_ERROR } slot_state_t;
+typedef struct { uint8_t packed[CINEMA_V2_PACKED_BYTES]; uint32_t frame_number; volatile slot_state_t state; volatile msd_error_t error; msd_transfer_t transfer; } frame_slot_t;
 typedef struct {
-    uint8_t packed[CINEMA_V2_PACKED_BYTES];
-    uint32_t frame_number;
-    volatile slot_state_t state;
-    volatile msd_error_t error;
-    msd_transfer_t transfer;
-} frame_slot_t;
-
-typedef struct {
-    global_t *global;
-    frame_slot_t slots[SLOT_COUNT];
-
-    uint32_t next_frame_to_queue;
-    uint32_t frame_count;
-    uint32_t start_frame;
-    bool has_presented;
-    uint32_t last_frame_presented;
-
-    uint32_t fps_num;
-    uint32_t fps_den;
-
-    clock_t start_tick;
-    clock_t pause_tick;
-    clock_t accumulated_pause_ticks;
-    bool paused;
-
-    uint32_t dropped_frames;
-    uint32_t repeated_frames;
+ global_t *global; const cin2_header_t *header; frame_slot_t slots[SLOT_COUNT];
+ uint8_t last_packed[CINEMA_V2_PACKED_BYTES]; bool have_last;
+ uint32_t next_frame_to_queue,frame_count,start_frame,last_frame_presented;
+ bool has_presented,paused,dashboard_visible; clock_t dashboard_tick;
+ uint32_t fps_num,fps_den; clock_t start_tick,pause_tick,accumulated_pause_ticks;
+ uint32_t dropped_frames,repeated_frames; cinema_settings_t settings; cinema_bookmarks_t bookmarks;
 } player_v2_t;
 
-/* Callback only records what happened -- no graphics calls, no printing,
- * no LBA math. The main loop decides what any of it means. */
-static void frame_read_callback(msd_error_t error, struct msd_transfer *xfer)
-{
-    frame_slot_t *slot = (frame_slot_t *)xfer->userptr;
-
-    slot->error = error;
-    slot->state = (error == MSD_SUCCESS) ? SLOT_READY : SLOT_ERROR;
-}
-
-static msd_error_t queue_frame(global_t *global, frame_slot_t *slot,
-                                uint32_t frame_number)
-{
-    msd_error_t result;
-
-    slot->frame_number = frame_number;
-    slot->error = MSD_SUCCESS;
-    slot->state = SLOT_LOADING;
-
-    slot->transfer.msd = &global->msd;
-    slot->transfer.lba = cin2_frame_lba(frame_number);
-    slot->transfer.count = CIN2_FRAME_SECTORS;
-    slot->transfer.buffer = slot->packed;
-    slot->transfer.callback = frame_read_callback;
-    slot->transfer.userptr = slot;
-
-    result = msd_ReadAsync(&slot->transfer);
-    if (result != MSD_SUCCESS) {
-        slot->error = result;
-        slot->state = SLOT_ERROR;
-    }
-
-    return result;
-}
-
-/* Queues the next not-yet-read frame into every SLOT_EMPTY slot. Returns
- * false only if msd_ReadAsync itself failed to queue (not if a
- * previously-queued transfer later errors out -- that's caught via
- * find_failed_slot in the main loop). */
-static bool refill_empty_slots(player_v2_t *player)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        frame_slot_t *slot = &player->slots[i];
-
-        if (slot->state != SLOT_EMPTY) {
-            continue;
-        }
-        if (player->next_frame_to_queue >= player->frame_count) {
-            continue;
-        }
-
-        if (queue_frame(player->global, slot, player->next_frame_to_queue)
-            != MSD_SUCCESS) {
-            return false;
-        }
-        player->next_frame_to_queue++;
-    }
-
-    return true;
-}
-
-static frame_slot_t *find_failed_slot(player_v2_t *player)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        if (player->slots[i].state == SLOT_ERROR) {
-            return &player->slots[i];
-        }
-    }
-
-    return NULL;
-}
-
-static bool all_queued_slots_resolved(player_v2_t *player)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        if (player->slots[i].state == SLOT_LOADING) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-/* Fills every slot and blocks until each either finishes or errors, so
- * playback starts with a full read-ahead buffer instead of the single
- * frame the original player waited for. */
-static bool prefill_frames(player_v2_t *player)
-{
-    if (!refill_empty_slots(player)) {
-        putstr("error queueing msd (prefill)");
-        return false;
-    }
-
-    while (!all_queued_slots_resolved(player)) {
-        usb_HandleEvents();
-
-        if (player->global->usb == NULL) {
-            putstr("usb device disconnected");
-            return false;
-        }
-        {
-            frame_slot_t *failed = find_failed_slot(player);
-            if (failed != NULL) {
-                put_msd_error(failed->error, "prefill");
-                return false;
-            }
-        }
-        if (os_GetCSC()) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-/* Frames that finished loading but are older than what the clock now
- * wants are stale -- we're behind schedule. Free their slots (counting
- * a drop) so refill_empty_slots can queue what actually comes next. */
-static void discard_obsolete_frames(player_v2_t *player, uint32_t wanted)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        frame_slot_t *slot = &player->slots[i];
-
-        if (slot->state == SLOT_READY && slot->frame_number < wanted) {
-            slot->state = SLOT_EMPTY;
-            player->dropped_frames++;
-        }
-    }
-}
-
-static frame_slot_t *find_ready_frame(player_v2_t *player, uint32_t wanted)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        frame_slot_t *slot = &player->slots[i];
-
-        if (slot->state == SLOT_READY && slot->frame_number == wanted) {
-            return slot;
-        }
-    }
-
-    return NULL;
-}
-
-/* Which frame *should* be on screen right now, based on wall-clock time
- * elapsed since playback started (minus any time spent paused), offset
- * by start_frame so a resumed movie schedules relative to where it
- * resumed rather than relative to frame 0 (whose slots aren't even
- * being queued anymore). Using uint64_t here (rather than trying to
- * keep everything in 32 bits) is deliberate: fps_num can be up to
- * 24000 and elapsed ticks can run into the hundreds of millions for a
- * long movie, and that product overflows 32 bits. This math runs once
- * per main-loop iteration, not per pixel, so the extra cost of 64-bit
- * arithmetic on ez80 is not a hot path.
- */
-static uint32_t desired_frame(const player_v2_t *player, clock_t now)
-{
-    clock_t elapsed = now - player->start_tick - player->accumulated_pause_ticks;
-    uint64_t numerator = (uint64_t)elapsed * player->fps_num;
-    uint64_t denominator = (uint64_t)CLOCKS_PER_SEC * player->fps_den;
-    uint64_t frame = (uint64_t)player->start_frame + numerator / denominator;
-
-    if (frame > 0xFFFFFFFFu) {
-        frame = 0xFFFFFFFFu;
-    }
-
-    return (uint32_t)frame;
-}
-
-static void render_frame(frame_slot_t *slot)
-{
-    gfx_SetDrawBuffer();
-    cinema_draw_packed4_scaled2x(slot->packed, &gfx_vbuffer[0][0],
-                                  GFX_LCD_WIDTH, V2_Y_OFFSET);
-    gfx_SwapDraw();
-    gfx_Wait();
-}
-
-static void save_resume_state(const player_v2_t *player)
-{
-    uint8_t var;
-
-    if (!player->has_presented) {
-        return;
-    }
-
-    var = ti_Open(APPVAR_V2, "w");
-    if (var) {
-        uint8_t raw[CIN2_RESUME_BYTES];
-        cin2_resume_t state;
-
-        state.frame_count = player->frame_count;
-        state.last_presented_frame = player->last_frame_presented;
-        cin2_build_resume_record(raw, &state);
-
-        ti_SetGCBehavior(NULL, NULL);
-        ti_SetArchiveStatus(0, var);
-        ti_Write(raw, 1, CIN2_RESUME_BYTES, var);
-        ti_SetArchiveStatus(1, var);
-        ti_Close(var);
-    }
-}
-
-static void print_playback_summary(const player_v2_t *player)
-{
-    char buffer[64];
-
-    sprintf(buffer, "frames shown: %lu", (unsigned long)(player->has_presented
-        ? player->last_frame_presented + 1 : 0));
-    putstr(buffer);
-    sprintf(buffer, "dropped: %lu  repeated: %lu",
-            (unsigned long)player->dropped_frames,
-            (unsigned long)player->repeated_frames);
-    putstr(buffer);
-}
-
-/* True once the last frame of the movie has been presented. */
-static bool playback_finished(const player_v2_t *player)
-{
-    return player->has_presented
-        && player->last_frame_presented + 1 >= player->frame_count;
-}
-
-static bool player_v2_loop(player_v2_t *player)
-{
-    while (true) {
-        uint8_t key;
-
-        usb_HandleEvents();
-
-        if (player->global->usb == NULL) {
-            putstr("usb device disconnected");
-            return false;
-        }
-
-        {
-            frame_slot_t *failed = find_failed_slot(player);
-            if (failed != NULL) {
-                put_msd_error(failed->error, "frame read");
-                return false;
-            }
-        }
-
-        if (!refill_empty_slots(player)) {
-            putstr("error queueing msd (frame)");
-            return false;
-        }
-
-        key = os_GetCSC();
-        if (key == sk_Clear) {
-            return true;
-        }
-        if (key == sk_2nd) {
-            if (!player->paused) {
-                player->paused = true;
-                player->pause_tick = clock();
-            } else {
-                player->paused = false;
-                player->accumulated_pause_ticks +=
-                    (clock_t)(clock() - player->pause_tick);
-            }
-        }
-
-        if (player->paused) {
-            continue;
-        }
-
-        {
-            uint32_t wanted = desired_frame(player, clock());
-            frame_slot_t *slot;
-
-            discard_obsolete_frames(player, wanted);
-            slot = find_ready_frame(player, wanted);
-
-            if (slot != NULL) {
-                render_frame(slot);
-                player->has_presented = true;
-                player->last_frame_presented = slot->frame_number;
-                slot->state = SLOT_EMPTY;
-
-                if (playback_finished(player)) {
-                    return true;
-                }
-            } else if (player->has_presented
-                       && wanted > player->last_frame_presented) {
-                /* Wanted frame isn't ready yet -- hold the currently
-                 * displayed frame rather than show nothing. */
-                player->repeated_frames++;
-            }
-        }
-    }
-}
-
-bool player_v2_run(global_t *global, const cin2_header_t *header,
-                    uint32_t start_frame)
-{
-    static player_v2_t player;
-    bool graphics_active = false;
-    bool ok;
-
-    if (header->frame_count == 0) {
-        putstr("movie has no frames");
-        return false;
-    }
-
-    memset(&player, 0, sizeof(player));
-    player.global = global;
-    player.frame_count = header->frame_count;
-    player.fps_num = header->fps_num;
-    player.fps_den = header->fps_den;
-    player.start_frame = start_frame;
-    player.next_frame_to_queue = start_frame;
-
-    gfx_Begin();
-    graphics_active = true;
-    gfx_SetPalette(header->palette, sizeof(header->palette), 0);
-    gfx_SwapDraw();
-    gfx_SetDrawBuffer();
-    gfx_ZeroScreen();
-    gfx_SwapDraw();
-    gfx_SetDrawBuffer();
-    gfx_ZeroScreen();
-
-    ok = prefill_frames(&player);
-    if (ok) {
-        player.start_tick = clock();
-        ok = player_v2_loop(&player);
-    }
-
-    if (graphics_active) {
-        gfx_End();
-    }
-
-    print_playback_summary(&player);
-
-    if (ok) {
-        save_resume_state(&player);
-    }
-
-    return ok;
-}
+static void frame_read_callback(msd_error_t e,struct msd_transfer *x){frame_slot_t*s=x->userptr;s->error=e;s->state=e==MSD_SUCCESS?SLOT_READY:SLOT_ERROR;}
+static msd_error_t queue_frame(global_t*g,frame_slot_t*s,uint32_t n){msd_error_t r;s->frame_number=n;s->error=MSD_SUCCESS;s->state=SLOT_LOADING;s->transfer.msd=&g->msd;s->transfer.lba=cin2_frame_lba(n);s->transfer.count=CIN2_FRAME_SECTORS;s->transfer.buffer=s->packed;s->transfer.callback=frame_read_callback;s->transfer.userptr=s;r=msd_ReadAsync(&s->transfer);if(r!=MSD_SUCCESS){s->error=r;s->state=SLOT_ERROR;}return r;}
+static uint8_t ready_count(const player_v2_t*p){uint8_t i,n=0;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_READY)n++;return n;}
+static frame_slot_t* failed(player_v2_t*p){uint8_t i;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_ERROR)return &p->slots[i];return NULL;}
+static bool refill(player_v2_t*p){uint8_t i;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_EMPTY&&p->next_frame_to_queue<p->frame_count){if(queue_frame(p->global,&p->slots[i],p->next_frame_to_queue)!=MSD_SUCCESS)return false;p->next_frame_to_queue++;}return true;}
+static bool loading(const player_v2_t*p){uint8_t i;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_LOADING)return true;return false;}
+static void buffering_screen(player_v2_t*p){char b[20];gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);ui_draw_text(&gfx_vbuffer[0][0],320,105,105,"BUFFERING",15);sprintf(b,"%u/4",(unsigned)ready_count(p));ui_draw_text(&gfx_vbuffer[0][0],320,145,118,b,15);gfx_SwapDraw();}
+static bool prefill(player_v2_t*p){if(!refill(p))return false;while(loading(p)){usb_HandleEvents();buffering_screen(p);if(!p->global->usb||failed(p)||os_GetCSC()==sk_Clear)return false;}return failed(p)==NULL;}
+static uint32_t desired_frame(const player_v2_t*p,clock_t now){clock_t e=now-p->start_tick-p->accumulated_pause_ticks;uint64_t f=(uint64_t)p->start_frame+((uint64_t)e*p->fps_num)/((uint64_t)CLOCKS_PER_SEC*p->fps_den);return f>0xffffffffu?0xffffffffu:(uint32_t)f;}
+static void draw_video(player_v2_t*p,const uint8_t*packed){uint8_t*fb=&gfx_vbuffer[0][0];if(p->settings.scale_mode==CINEMA_SCALE_ORIGINAL){ui_fill_rect(fb,320,0,0,320,240,0);cinema_draw_packed4_original(packed,fb,320);}else if(p->settings.scale_mode==CINEMA_SCALE_STRETCH){cinema_draw_packed4_stretch(packed,fb,320);}else{ui_fill_rect(fb,320,0,0,320,24,0);ui_fill_rect(fb,320,0,216,320,24,0);cinema_draw_packed4_scaled2x(packed,fb,320,V2_Y_OFFSET);}}
+static void draw_dashboard(player_v2_t*p){if(!p->dashboard_visible)return;ui_draw_progress(&gfx_vbuffer[0][0],320,p->last_frame_presented,p->frame_count,ready_count(p),SLOT_COUNT,p->paused,p->fps_num,p->fps_den);if(p->header->title[0])ui_draw_text(&gfx_vbuffer[0][0],320,94,230,p->header->title,15);}
+static void present(player_v2_t*p,const uint8_t*packed){gfx_Wait();gfx_SetDrawBuffer();draw_video(p,packed);draw_dashboard(p);gfx_SwapDraw();memcpy(p->last_packed,packed,CINEMA_V2_PACKED_BYTES);p->have_last=true;}
+static void redraw(player_v2_t*p){if(p->have_last)present(p,p->last_packed);}
+static void discard_old(player_v2_t*p,uint32_t w){uint8_t i;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_READY&&p->slots[i].frame_number<w){p->slots[i].state=SLOT_EMPTY;p->dropped_frames++;}}
+static frame_slot_t* find_ready(player_v2_t*p,uint32_t w){uint8_t i;for(i=0;i<SLOT_COUNT;i++)if(p->slots[i].state==SLOT_READY&&p->slots[i].frame_number==w)return &p->slots[i];return NULL;}
+static bool drain(player_v2_t*p){while(loading(p)){usb_HandleEvents();if(!p->global->usb||failed(p))return false;}return true;}
+static bool seek_to(player_v2_t*p,uint32_t target){uint8_t i;frame_slot_t*s;if(target>=p->frame_count)target=p->frame_count-1;if(!drain(p))return false;for(i=0;i<SLOT_COUNT;i++)p->slots[i].state=SLOT_EMPTY;p->next_frame_to_queue=target;p->start_frame=target;p->has_presented=false;p->have_last=false;p->accumulated_pause_ticks=0;if(!prefill(p))return false;p->dashboard_visible=true;p->dashboard_tick=clock();s=find_ready(p,target);if(s){p->last_frame_presented=target;p->has_presented=true;present(p,s->packed);s->state=SLOT_EMPTY;}p->start_tick=clock();if(p->paused)p->pause_tick=p->start_tick;return true;}
+static uint32_t seek_delta_frames(player_v2_t*p){return (uint32_t)(((uint64_t)cinema_seek_seconds(&p->settings)*p->fps_num)/p->fps_den);}
+static void line(player_v2_t*p,uint16_t y,const char*s,bool selected){(void)p;ui_fill_rect(&gfx_vbuffer[0][0],320,8,y-1,304,10,selected?8:0);ui_draw_text(&gfx_vbuffer[0][0],320,12,y,s,15);}
+static uint8_t menu_wait_key(player_v2_t*p){uint8_t k;do{usb_HandleEvents();k=os_GetCSC();if(!p->global->usb)return sk_Clear;}while(!k);return k;}
+static void info_screen(player_v2_t*p){char b[48],t[9];gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);ui_draw_text(&gfx_vbuffer[0][0],320,8,8,p->header->title[0]?p->header->title:"CINEMA V2",15);sprintf(b,"SIZE 160X96  COLORS 16");ui_draw_text(&gfx_vbuffer[0][0],320,8,30,b,15);sprintf(b,"FPS %lu/%lu",(unsigned long)p->fps_num,(unsigned long)p->fps_den);ui_draw_text(&gfx_vbuffer[0][0],320,8,44,b,15);sprintf(b,"FRAMES %lu",(unsigned long)p->frame_count);ui_draw_text(&gfx_vbuffer[0][0],320,8,58,b,15);ui_format_time(t,p->last_frame_presented,p->fps_num,p->fps_den);sprintf(b,"POSITION %s",t);ui_draw_text(&gfx_vbuffer[0][0],320,8,72,b,15);sprintf(b,"CHAPTERS %u",p->header->chapter_count);ui_draw_text(&gfx_vbuffer[0][0],320,8,86,b,15);ui_draw_text(&gfx_vbuffer[0][0],320,8,220,"CLEAR TO RETURN",15);gfx_SwapDraw();while(menu_wait_key(p)!=sk_Clear){}redraw(p);}
+static bool chapter_screen(player_v2_t*p){uint8_t sel=0,k,i;if(!p->header->chapter_count){info_screen(p);return true;}for(;;){gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);ui_draw_text(&gfx_vbuffer[0][0],320,8,6,"CHAPTERS",15);for(i=0;i<p->header->chapter_count&&i<12;i++){char b[28];sprintf(b,"%02u %s",i+1,p->header->chapters[i].name);line(p,22+i*15,b,i==sel);}gfx_SwapDraw();k=menu_wait_key(p);if(k==sk_Clear){redraw(p);return true;}if(k==sk_Up&&sel)sel--;if(k==sk_Down&&sel+1<p->header->chapter_count)sel++;if(k==sk_2nd)return seek_to(p,p->header->chapters[sel].frame);}}
+static bool bookmark_screen(player_v2_t*p){uint8_t sel=0,k,i;for(;;){gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);line(p,8,"ADD CURRENT BOOKMARK",sel==0);for(i=0;i<p->bookmarks.count;i++){char b[24],t[9];ui_format_time(t,p->bookmarks.frame[i],p->fps_num,p->fps_den);sprintf(b,"BOOKMARK %u  %s",i+1,t);line(p,23+i*15,b,sel==i+1);}gfx_SwapDraw();k=menu_wait_key(p);if(k==sk_Clear){redraw(p);return true;}if(k==sk_Up&&sel)sel--;if(k==sk_Down&&sel<p->bookmarks.count)sel++;if(k==sk_2nd){if(sel==0){cinema_bookmarks_add(&p->bookmarks,p->last_frame_presented);redraw(p);return true;}return seek_to(p,p->bookmarks.frame[sel-1]);}}}
+static void settings_screen(player_v2_t*p){uint8_t sel=0,k;for(;;){char a[28],b[28],c[28];sprintf(a,"SEEK %u SECONDS",cinema_seek_seconds(&p->settings));sprintf(b,"DASHBOARD %u SECONDS",p->settings.dashboard_seconds);sprintf(c,"SCALE %s",p->settings.scale_mode==0?"2X":p->settings.scale_mode==1?"ORIGINAL":"STRETCH");gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);line(p,20,a,sel==0);line(p,40,b,sel==1);line(p,60,c,sel==2);ui_draw_text(&gfx_vbuffer[0][0],320,8,220,"LEFT RIGHT CHANGE CLEAR SAVE",15);gfx_SwapDraw();k=menu_wait_key(p);if(k==sk_Clear){cinema_settings_save(&p->settings);redraw(p);return;}if(k==sk_Up&&sel)sel--;if(k==sk_Down&&sel<2)sel++;if(k==sk_Left||k==sk_Right){int d=k==sk_Right?1:-1;if(sel==0)p->settings.seek_index=(p->settings.seek_index+5+d)%5;if(sel==1){int v=p->settings.dashboard_seconds+d;if(v<1)v=1;if(v>9)v=9;p->settings.dashboard_seconds=v;}if(sel==2)p->settings.scale_mode=(p->settings.scale_mode+3+d)%3;}}}
+static bool main_menu(player_v2_t*p){static const char*items[MENU_COUNT]={"INFORMATION","CHAPTERS","BOOKMARKS","SCALE MODE","SETTINGS","RESTART MOVIE","BACK"};uint8_t sel=0,k,i;bool was=p->paused;clock_t entered=clock();p->paused=true;for(;;){gfx_Wait();gfx_SetDrawBuffer();ui_fill_rect(&gfx_vbuffer[0][0],320,0,0,320,240,0);for(i=0;i<MENU_COUNT;i++)line(p,10+i*18,items[i],i==sel);gfx_SwapDraw();k=menu_wait_key(p);if(k==sk_Clear||((k==sk_2nd)&&sel==6)){if(!was)p->accumulated_pause_ticks+=clock()-entered;p->paused=was;redraw(p);return true;}if(k==sk_Up&&sel)sel--;if(k==sk_Down&&sel+1<MENU_COUNT)sel++;if(k==sk_2nd){if(sel==0)info_screen(p);else if(sel==1){bool r=chapter_screen(p);if(!r)return false;p->paused=was;return true;}else if(sel==2){bool r=bookmark_screen(p);if(!r)return false;p->paused=was;return true;}else if(sel==3){p->settings.scale_mode=(p->settings.scale_mode+1)%3;cinema_settings_save(&p->settings);redraw(p);}else if(sel==4)settings_screen(p);else if(sel==5){bool r=seek_to(p,0);p->paused=was;return r;}}}}
+static void save_resume(const player_v2_t*p){uint8_t h,raw[CIN2_RESUME_BYTES];cin2_resume_t s;if(!p->has_presented)return;s.frame_count=p->frame_count;s.last_presented_frame=p->last_frame_presented;cin2_build_resume_record(raw,&s);h=ti_Open(APPVAR_V2,"w");if(h){ti_Write(raw,1,sizeof(raw),h);ti_Close(h);}}
+static bool loop(player_v2_t*p){while(true){uint8_t k;usb_HandleEvents();if(!p->global->usb||failed(p))return false;if(!refill(p))return false;k=os_GetCSC();if(k){p->dashboard_visible=true;p->dashboard_tick=clock();if(k==sk_Clear)return true;if(k==sk_2nd){p->paused=!p->paused;if(p->paused)p->pause_tick=clock();else p->accumulated_pause_ticks+=clock()-p->pause_tick;redraw(p);}else if(k==sk_Mode){p->dashboard_visible=!p->dashboard_visible;redraw(p);}else if(k==sk_Del){if(!main_menu(p))return false;}else if(k==sk_Left||k==sk_Right){uint32_t d=seek_delta_frames(p),t=p->last_frame_presented;if(k==sk_Left)t=t>d?t-d:0;else t=t+d<p->frame_count?t+d:p->frame_count-1;if(!seek_to(p,t))return false;}}
+ if(p->dashboard_visible&&!p->paused&&(clock()-p->dashboard_tick)>(clock_t)p->settings.dashboard_seconds*CLOCKS_PER_SEC){p->dashboard_visible=false;redraw(p);}if(p->paused)continue;{uint32_t w=desired_frame(p,clock());frame_slot_t*s;discard_old(p,w);s=find_ready(p,w);if(s){present(p,s->packed);p->has_presented=true;p->last_frame_presented=s->frame_number;s->state=SLOT_EMPTY;if(p->last_frame_presented+1>=p->frame_count)return true;}else if(p->has_presented&&w>p->last_frame_presented)p->repeated_frames++;}}}
+bool player_v2_run(global_t*g,const cin2_header_t*h,uint32_t start){static player_v2_t p;bool ok;if(!h->frame_count||start>=h->frame_count)return false;memset(&p,0,sizeof(p));p.global=g;p.header=h;p.frame_count=h->frame_count;p.fps_num=h->fps_num;p.fps_den=h->fps_den;p.start_frame=start;p.next_frame_to_queue=start;p.dashboard_visible=true;p.dashboard_tick=clock();cinema_settings_load(&p.settings);cinema_bookmarks_load(&p.bookmarks,cinema_movie_key(h));gfx_Begin();gfx_SetPalette(h->palette,sizeof(h->palette),0);gfx_SetDrawBuffer();gfx_ZeroScreen();gfx_SwapDraw();gfx_SetDrawBuffer();gfx_ZeroScreen();ok=prefill(&p);if(ok){p.start_tick=clock();ok=loop(&p);}gfx_End();if(ok)save_resume(&p);return ok;}
