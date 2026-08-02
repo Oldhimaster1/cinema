@@ -1,39 +1,27 @@
-typedef struct global global_t;
-#define usb_callback_data_t global_t
+#include "cinema.h"
+#include "cin2.h"
+#include "decode.h"
+#include "player_v1.h"
+#include "player_v2.h"
 
 #include <fileioc.h>
-#include <graphx.h>
 #include <msddrvce.h>
 #include <tice.h>
 #include <usbdrvce.h>
 
-#include <stdio.h>
 #include <stdbool.h>
-#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
-#define MAX_PARTITIONS 32
-#define BLOCK_SIZE 512
-#define APPVAR "SSCINEMA"
-
-//Initialize the sprite buffers
-gfx_sprite_t *sprite_buffer_1;
-gfx_sprite_t *sprite_buffer_2;
-
-
-struct global
+void putstr(const char *str)
 {
-    usb_device_t usb;
-    msd_t msd;
-};
-enum { USB_RETRY_INIT = USB_USER_ERROR };
-static void putstr(char *str)
-{
-    os_PutStrFull(str);
+    os_PutStrFull((char *)str);
     os_NewLine();
 }
-static usb_error_t handleUsbEvent(usb_event_t event, void *event_data,
-                                  usb_callback_data_t *global)
+
+usb_error_t handleUsbEvent(usb_event_t event, void *event_data,
+                            usb_callback_data_t *global)
 {
     switch (event)
     {
@@ -60,43 +48,96 @@ static usb_error_t handleUsbEvent(usb_event_t event, void *event_data,
     return USB_SUCCESS;
 }
 
+/* Prompts "resume where you left off?" and, if the user says yes and a
+ * valid v1 resume record exists, returns the saved palette LBA.
+ * Otherwise returns 0 (start of movie). Mirrors the original Cinema's
+ * inline resume menu exactly -- same appvar, same 4-byte raw-LBA
+ * format, same prompt -- so existing v1 resume state keeps working. */
+static uint32_t v1_resume_menu(void)
+{
+    uint32_t start_lba = 0;
+    uint8_t var = ti_Open(APPVAR_V1, "r+");
 
-//declare functions
-void palette_callback(msd_error_t error, struct msd_transfer *xfer);
-void image_callback(msd_error_t error, struct msd_transfer *xfer);
-void cinema_Save(uint32_t *lba, uint8_t var);
-uint32_t cinema_Load(uint8_t var);
+    if (var) {
+        putstr("Resume where you left off?");
+        putstr("Other - YES        0 - NO");
+
+        while (1) {
+            uint8_t key = os_GetCSC();
+            if (key) {
+                if (key != sk_0) {
+                    ti_Read(&start_lba, sizeof(uint32_t), 1, var);
+                    ti_SetGCBehavior(NULL, NULL);
+                    ti_SetArchiveStatus(1, var);
+                }
+                break;
+            }
+        }
+        ti_Close(var);
+    }
+
+    return start_lba;
+}
+
+/* Same idea as v1_resume_menu but for the v2 (CIN2) resume record. Only
+ * offers to resume if a record exists, parses successfully, and was
+ * saved against a movie with the same frame count -- otherwise a stale
+ * or mismatched record is silently discarded and playback starts from
+ * frame 0, rather than risking seeking into a differently-encoded
+ * movie. */
+static uint32_t v2_resume_menu(const cin2_header_t *header)
+{
+    uint8_t var;
+    cin2_resume_t resume;
+    bool have_resume = false;
+
+    var = ti_Open(APPVAR_V2, "r+");
+    if (var) {
+        uint8_t raw[CIN2_RESUME_BYTES];
+
+        if (ti_Read(raw, 1, CIN2_RESUME_BYTES, var) == CIN2_RESUME_BYTES
+            && cin2_parse_resume_record(raw, &resume)
+            && resume.frame_count == header->frame_count
+            && resume.last_presented_frame + 1 < header->frame_count) {
+            have_resume = true;
+        }
+        ti_Close(var);
+    }
+
+    if (!have_resume) {
+        return 0;
+    }
+
+    putstr("Resume where you left off?");
+    putstr("Other - YES        0 - NO");
+
+    while (1) {
+        uint8_t key = os_GetCSC();
+        if (key) {
+            if (key == sk_0) {
+                return 0;
+            }
+            return resume.last_presented_frame + 1;
+        }
+    }
+}
 
 int main(void)
 {
-    //declare variables   
     static char buffer[212];
     static global_t global;
-    uint16_t palette_buffer_1[256] = {0};
-    uint16_t palette_buffer_2[256];
-    bool render = false;
-    msd_transfer_t xfer_palette;
-    msd_transfer_t xfer_image;
-    msd_info_t msdinfo;
+    static uint8_t header_sector[BLOCK_SIZE];
     usb_error_t usberr;
     msd_error_t msderr;
+    msd_info_t msdinfo;
+    cin2_header_t v2_header;
+    bool is_v2 = false;
+    bool player_ok;
 
-    xfer_palette.msd = &global.msd;
-    xfer_palette.lba = 0;
-    xfer_palette.count = 1;
-    xfer_palette.callback = palette_callback;
-
-    xfer_image.msd = &global.msd;
-    xfer_image.lba = 1;
-    xfer_image.count = 30;
-    xfer_image.callback = image_callback;
-    xfer_image.userptr = &render;
-
-   //usb & msd initialization
     memset(&global, 0, sizeof(global_t));
     os_SetCursorPos(1, 0);
 
-    // usb initialization loop; waits for something to be plugged in
+    /* usb initialization loop; waits for something to be plugged in */
     do
     {
         global.usb = NULL;
@@ -113,7 +154,6 @@ int main(void)
             if (global.usb != NULL)
                 break;
 
-            // break out if a key is pressed
             if (os_GetCSC())
             {
                 putstr("exiting cinema, press a key");
@@ -130,7 +170,6 @@ int main(void)
         goto usb_error;
     }
 
-    // initialize the msd device
     msderr = msd_Open(&global.msd, global.usb);
     if (msderr != MSD_SUCCESS)
     {
@@ -140,7 +179,6 @@ int main(void)
 
     putstr("opened msd");
 
-    // get block count and size
     msderr = msd_Info(&global.msd, &msdinfo);
     if (msderr != MSD_SUCCESS)
     {
@@ -148,243 +186,76 @@ int main(void)
         goto msd_error;
     }
 
-    // print msd sector number and size
     sprintf(buffer, "block size: %u bytes", (uint24_t)msdinfo.bsize);
     putstr(buffer);
     sprintf(buffer, "num blocks: %u", (uint24_t)msdinfo.bnum);
     putstr(buffer);
-    
-    os_ClrHome();
 
-    {   //save menu
-        uint8_t var = ti_Open(APPVAR, "r+");
-        if (var) {
-            putstr("Resume where you left off?");
-            putstr("Other - YES        0 - NO");
-
-            while (1) {
-                uint8_t key = os_GetCSC();
-                if (key) {
-                    if (key == sk_0) {
-                        break;
-                    }
-                    else {
-                        xfer_palette.lba = cinema_Load(var);
-                        xfer_image.lba = xfer_palette.lba + 1;
-                        ti_SetGCBehavior(NULL, NULL);
-                        ti_SetArchiveStatus(1, var);
-                        break;
-                    }
-                }
-            }
-            ti_Close(var);
-        }
-    }  
-    {   //graphx
-        gfx_Begin();
-        gfx_SwapDraw();
-        gfx_SetDrawBuffer();
-        gfx_ZeroScreen();
-        gfx_SwapDraw();
-        gfx_SetDrawBuffer();
-        gfx_ZeroScreen();
-
-        //Allocate memory for the sprites
-        sprite_buffer_1 = gfx_MallocSprite(160, 96);
-        sprite_buffer_2 = gfx_MallocSprite(160, 96);
-
-        //Load the first frame
-        xfer_palette.buffer = palette_buffer_1;
-        xfer_image.buffer = &sprite_buffer_1->data;
-        
-        msderr = msd_ReadAsync(&xfer_palette);
-        if (msderr != MSD_SUCCESS) {
-            putstr("error queueing msd (palette)");
-            goto msd_error;
-        }
-        msderr = msd_ReadAsync(&xfer_image);
-        if (msderr != MSD_SUCCESS) {
-            putstr("error queueing msd (image)");
-            goto msd_error;
-        }
-
-        while(!render){
-            usb_HandleEvents();
-        }
-
-        render = false;
-
-        //Main Loop
-        while (!os_GetCSC()) {
-            //set the buffers
-            gfx_SetDrawBuffer();
-            xfer_image.buffer = &sprite_buffer_2->data;
-            xfer_palette.buffer = palette_buffer_2;
-
-            //queue the async reads
-            msderr = msd_ReadAsync(&xfer_palette);
-            if (msderr != MSD_SUCCESS) {
-                putstr("error queueing msd (palette)");
-                goto msd_error;
-            }
-            msderr = msd_ReadAsync(&xfer_image);
-            if (msderr != MSD_SUCCESS) {
-                putstr("error queueing msd (image)");
-                goto msd_error;
-            }
-            
-            //display the image while async is reading
-            gfx_ScaledSprite_NoClip(sprite_buffer_1, 0, 24, 2, 2);
-            gfx_SwapDraw();
-            gfx_Wait();
-            gfx_SetPalette(palette_buffer_1, 512, 0);
-
-            //run the callbacks
-            while(!render){
-                usb_HandleEvents();
-            }
-            render = false;
-
-            //set to read to the other buffers (double buffering)
-            gfx_SetDrawBuffer();
-            xfer_image.buffer = &sprite_buffer_1->data;
-            xfer_palette.buffer = palette_buffer_1;
-
-            
-            msderr = msd_ReadAsync(&xfer_palette);
-            if (msderr != MSD_SUCCESS) {
-                putstr("error queueing msd (palette)");
-                goto msd_error;
-            }
-            msderr = msd_ReadAsync(&xfer_image);
-            if (msderr != MSD_SUCCESS) {
-                putstr("error queueing msd (image)");
-                goto msd_error;
-            }
-            
-            //display the image while async is reading
-            gfx_ScaledSprite_NoClip(sprite_buffer_2, 0, 24, 2, 2);
-            gfx_SwapDraw();
-            gfx_Wait();
-            gfx_SetPalette(palette_buffer_2, 512, 0);
-
-            //run the callbacks
-            while(!render){
-                usb_HandleEvents();
-            }
-            render = false;
-
-        }
-        gfx_End();
+    if (msdinfo.bsize != BLOCK_SIZE)
+    {
+        putstr("unsupported block size");
+        goto msd_error;
     }
-    {   //save place
-        uint8_t var = ti_Open(APPVAR, "w");
-        if (var) {
-            //set the var to ram so ti_open can write to it
-            ti_SetGCBehavior(NULL, NULL);
-            ti_SetArchiveStatus(0, var);
-            cinema_Save(&xfer_palette.lba, var);
-            //re-archive the variable
-            ti_SetArchiveStatus(1, var);
-            ti_Close(var);
+
+    if (msd_Read(&global.msd, 0, 1, header_sector) != 1)
+    {
+        putstr("error reading drive header");
+        goto msd_error;
+    }
+
+    is_v2 = cin2_has_magic(header_sector);
+    if (is_v2)
+    {
+        if (!cin2_parse_header(header_sector, &v2_header))
+        {
+            putstr("corrupt or unsupported CIN2 header");
+            goto msd_error;
+        }
+        if (v2_header.width != CINEMA_V2_WIDTH
+            || v2_header.height != CINEMA_V2_HEIGHT)
+        {
+            putstr("unsupported CIN2 resolution");
+            goto msd_error;
+        }
+
+        os_ClrHome();
+        putstr("Cinema v2 (CIN2) detected");
+        {
+            uint32_t start_frame = v2_resume_menu(&v2_header);
+            player_ok = player_v2_run(&global, &v2_header, start_frame);
+        }
+    }
+    else
+    {
+        os_ClrHome();
+        putstr("Cinema v1 (legacy) drive detected");
+        {
+            uint32_t start_lba = v1_resume_menu();
+            player_ok = player_v1_run(&global, start_lba);
         }
     }
 
     msd_Close(&global.msd);
     usb_Cleanup();
+
+    if (!player_ok) {
+        while (!os_GetCSC());
+    }
+
     return 0;
-    
 
 msd_error:
-    // close the msd device
     msd_Close(&global.msd);
     usb_Cleanup();
 
     while (!os_GetCSC());
-    
+
     return 0;
 
 usb_error:
-    // cleanup usb
     usb_Cleanup();
 
     while (!os_GetCSC());
 
     return 0;
-}
-
-void palette_callback(msd_error_t error, struct msd_transfer *xfer) {
-    xfer->lba += 31;
-    if (error != MSD_SUCCESS) {
-        gfx_End();
-        switch (error) {
-            case MSD_ERROR_INVALID_PARAM:
-                putstr("invalid param (palette)");
-                break;
-            case MSD_ERROR_USB_FAILED:
-                putstr("usb failed (palette)");
-                break;
-            case MSD_ERROR_SCSI_FAILED:
-                putstr("scsi failed (palette)");
-                break;
-            case MSD_ERROR_SCSI_CHECK_CONDITION:
-                putstr("scsi check condition (palette)");
-                break;
-            case MSD_ERROR_NOT_SUPPORTED:
-                putstr("not supported (palette)");
-                break;
-            case MSD_ERROR_INVALID_DEVICE:
-                putstr("invalid device (palette)");
-                break;
-            case MSD_ERROR_TIMEOUT:
-                putstr("timeout (palette)");
-                break;
-            default:
-                putstr("Unknown error.");
-                break;
-        }
-    }
-}
-void image_callback(msd_error_t error, struct msd_transfer *xfer) {
-    xfer->lba += 31;
-    *(bool*)xfer->userptr = true;
-    if (error != MSD_SUCCESS) {
-        gfx_End();
-        switch (error) {
-            case MSD_ERROR_INVALID_PARAM:
-                putstr("invalid param (image)");
-                break;
-            case MSD_ERROR_USB_FAILED:
-                putstr("usb failed (image)");
-                break;
-            case MSD_ERROR_SCSI_FAILED:
-                putstr("scsi failed (image)");
-                break;
-            case MSD_ERROR_SCSI_CHECK_CONDITION:
-                putstr("scsi check condition (image)");
-                break;
-            case MSD_ERROR_NOT_SUPPORTED:
-                putstr("not supported (image)");
-                break;
-            case MSD_ERROR_INVALID_DEVICE:
-                putstr("invalid device (image)");
-                break;
-            case MSD_ERROR_TIMEOUT:
-                putstr("timeout (image)");
-                break;
-            default:
-                putstr("Unknown error.");
-                break;
-        }
-    }
-}
-void cinema_Save(uint32_t *lba, uint8_t var) {
-    ti_Write(lba, sizeof(uint32_t), 1, var);
-}
-uint32_t cinema_Load(uint8_t var) {
-    uint32_t lba;
-
-    ti_Read(&lba, sizeof(uint32_t), 1, var);
-
-    return lba;
 }

@@ -1,0 +1,160 @@
+"""Pure byte-level CIN2 format helpers -- the Python mirror of
+src/cin2.c. See docs/CIN2_FORMAT.md for the authoritative binary layout;
+if you change either this file or src/cin2.c, update the other and the
+spec in the same commit. tests/test_cin2_format.py checks this module
+against known-answer test vectors shared with tests/test_decode.c.
+"""
+from __future__ import annotations
+
+import struct
+import zlib
+from dataclasses import dataclass, field
+from typing import Sequence
+
+MAGIC = b"CIN2"
+VERSION = 2
+HEADER_BYTES = 512
+CRC_BYTES = 22  # bytes [0, 22) covered by header_crc32
+DATA_LBA = 1
+FRAME_SECTORS = 15
+SECTOR_BYTES = 512
+PALETTE_ENTRIES = 16
+
+# The only geometry the calculator-side decoder (src/decode.c) knows how
+# to draw. An encoder targeting a different resolution would need a
+# corresponding change on the calculator, not just here.
+WIDTH = 160
+HEIGHT = 96
+PACKED_BYTES = (WIDTH * HEIGHT) // 2
+
+RESUME_MAGIC = b"CR2S"
+RESUME_BYTES = 20
+
+
+def crc32(data: bytes) -> int:
+    """Standard CRC-32 (IEEE 802.3): poly 0xEDB88320, init/final XOR
+    0xFFFFFFFF -- the zlib/gzip/PNG variant, which is exactly what
+    zlib.crc32 computes."""
+    return zlib.crc32(data) & 0xFFFFFFFF
+
+
+def frame_lba(frame_number: int) -> int:
+    return DATA_LBA + frame_number * FRAME_SECTORS
+
+
+@dataclass
+class Cin2Header:
+    width: int
+    height: int
+    fps_num: int
+    fps_den: int
+    frame_count: int
+    palette: Sequence[int] = field(default_factory=lambda: [0] * PALETTE_ENTRIES)
+
+
+def build_header(header: Cin2Header) -> bytes:
+    if len(header.palette) != PALETTE_ENTRIES:
+        raise ValueError(f"palette must have exactly {PALETTE_ENTRIES} entries")
+    for entry in header.palette:
+        if not 0 <= entry <= 0xFFFF:
+            raise ValueError("palette entries must fit in 16 bits (RGB565)")
+
+    buf = bytearray(HEADER_BYTES)
+    buf[0:4] = MAGIC
+    buf[4] = VERSION
+    buf[5] = 0  # flags, reserved
+    struct.pack_into(
+        "<HHLLL", buf, 6,
+        header.width, header.height, header.fps_num, header.fps_den,
+        header.frame_count,
+    )
+    struct.pack_into("<L", buf, 22, crc32(bytes(buf[:CRC_BYTES])))
+    for i, entry in enumerate(header.palette):
+        struct.pack_into("<H", buf, 26 + i * 2, entry)
+    return bytes(buf)
+
+
+def parse_header(raw: bytes) -> Cin2Header:
+    if len(raw) < HEADER_BYTES:
+        raise ValueError("header shorter than CIN2_HEADER_BYTES")
+    if raw[0:4] != MAGIC:
+        raise ValueError("bad magic")
+    if raw[4] != VERSION:
+        raise ValueError(f"unsupported version {raw[4]}")
+
+    stored_crc = struct.unpack_from("<L", raw, 22)[0]
+    computed_crc = crc32(raw[:CRC_BYTES])
+    if stored_crc != computed_crc:
+        raise ValueError(
+            f"bad header CRC (stored 0x{stored_crc:08X}, computed 0x{computed_crc:08X})"
+        )
+
+    width, height, fps_num, fps_den, frame_count = struct.unpack_from("<HHLLL", raw, 6)
+    if fps_num == 0 or fps_den == 0:
+        raise ValueError("fps_num/fps_den must be nonzero")
+    palette = list(struct.unpack_from(f"<{PALETTE_ENTRIES}H", raw, 26))
+
+    return Cin2Header(
+        width=width, height=height, fps_num=fps_num, fps_den=fps_den,
+        frame_count=frame_count, palette=palette,
+    )
+
+
+def pack_frame(indices: Sequence[int]) -> bytes:
+    """indices: WIDTH*HEIGHT palette indices (0..15), row-major,
+    top-to-bottom, left-to-right. Returns PACKED_BYTES bytes."""
+    if len(indices) != WIDTH * HEIGHT:
+        raise ValueError(f"expected {WIDTH * HEIGHT} indices, got {len(indices)}")
+
+    out = bytearray(PACKED_BYTES)
+    for i in range(0, len(indices), 2):
+        left = indices[i]
+        right = indices[i + 1]
+        if not (0 <= left <= 15 and 0 <= right <= 15):
+            raise ValueError("palette indices must be 4-bit (0..15)")
+        out[i // 2] = (left << 4) | right
+    return bytes(out)
+
+
+def unpack_frame(packed: bytes) -> list[int]:
+    if len(packed) != PACKED_BYTES:
+        raise ValueError(f"expected {PACKED_BYTES} bytes, got {len(packed)}")
+
+    out: list[int] = []
+    for b in packed:
+        out.append(b >> 4)
+        out.append(b & 0x0F)
+    return out
+
+
+@dataclass
+class ResumeRecord:
+    frame_count: int
+    last_presented_frame: int
+
+
+def build_resume_record(record: ResumeRecord) -> bytes:
+    buf = bytearray(RESUME_BYTES)
+    buf[0:4] = RESUME_MAGIC
+    buf[4] = VERSION
+    struct.pack_into("<L", buf, 8, record.frame_count)
+    struct.pack_into("<L", buf, 12, record.last_presented_frame)
+    struct.pack_into("<L", buf, 16, crc32(bytes(buf[:16])))
+    return bytes(buf)
+
+
+def parse_resume_record(raw: bytes) -> ResumeRecord:
+    if len(raw) < RESUME_BYTES:
+        raise ValueError("resume record shorter than CIN2_RESUME_BYTES")
+    if raw[0:4] != RESUME_MAGIC:
+        raise ValueError("bad resume magic")
+    if raw[4] != VERSION:
+        raise ValueError(f"unsupported resume version {raw[4]}")
+
+    stored_crc = struct.unpack_from("<L", raw, 16)[0]
+    computed_crc = crc32(raw[:16])
+    if stored_crc != computed_crc:
+        raise ValueError("bad resume record CRC")
+
+    frame_count, last_presented_frame = struct.unpack_from("<LL", raw, 8)
+    return ResumeRecord(frame_count=frame_count, last_presented_frame=last_presented_frame)
