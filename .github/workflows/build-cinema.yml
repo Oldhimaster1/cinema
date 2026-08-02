@@ -1,0 +1,492 @@
+name: Cinema CI and CEdev Build
+
+on:
+  push:
+    branches:
+      - main
+      - claude/cinema-v2-24fps-packed-n4abwh
+      - feature/cinema-v2-player-ui
+    paths:
+      - .github/workflows/build-cinema.yml
+      - makefile
+      - src/**
+      - tests/**
+      - tools/**
+      - docs/CIN2_FORMAT.md
+      - README.md
+  pull_request:
+    branches:
+      - main
+      - claude/cinema-v2-24fps-packed-n4abwh
+    paths:
+      - .github/workflows/build-cinema.yml
+      - makefile
+      - src/**
+      - tests/**
+      - tools/**
+      - docs/CIN2_FORMAT.md
+      - README.md
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CEDEV_VERSION: v15.0
+  CEDEV_LINUX_SHA256: REPLACE_WITH_VERIFIED_CEDEV_V15_LINUX_SHA256
+
+jobs:
+  host-tests:
+    name: Host-side validation
+    runs-on: ubuntu-latest
+    outputs:
+      commit-sha: ${{ steps.info.outputs.commit-sha }}
+      short-sha: ${{ steps.info.outputs.short-sha }}
+      build-start: ${{ steps.info.outputs.build-start }}
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Print system and build environment info
+        id: info
+        run: |
+          set -euo pipefail
+          
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          GIT_REF="$(git rev-parse --abbrev-ref HEAD)"
+          BUILD_START="$(date -u +%s)"
+          
+          echo "commit-sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build-start=${BUILD_START}" >> "$GITHUB_OUTPUT"
+          
+          echo "=== Git and Source ==="
+          echo "Complete Git commit SHA: ${COMMIT_SHA}"
+          echo "Short Git commit SHA: ${SHORT_SHA}"
+          echo "Git ref: ${GIT_REF}"
+          
+          echo "=== Runner Environment ==="
+          echo "Runner OS: ${RUNNER_OS}"
+          uname -m
+          
+          echo "=== Build Tools ==="
+          gcc --version | head -1
+          make --version | head -1
+          python3 --version
+          python3 -m pytest --version 2>/dev/null || echo "pytest version: (checking after install)"
+          
+          echo "=== Python Dependencies ==="
+          python3 -c "import PIL; print(f'Pillow: {PIL.__version__}')" 2>/dev/null || echo "Pillow: (checking after install)"
+          python3 -c "import numpy; print(f'NumPy: {numpy.__version__}')" 2>/dev/null || echo "NumPy: (checking after install)"
+          
+          echo "=== Media Tools ==="
+          ffmpeg -version 2>/dev/null | head -1 || echo "ffmpeg: not yet installed"
+
+      - name: Install required Ubuntu packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 python3-pip ffmpeg
+
+      - name: Install Python packages
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest numpy pillow
+
+      - name: Verify Python compilation
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/cin2_format.py tools/encode_cin2.py tools/cin2_metadata.py
+
+      - name: Git diff check
+        run: |
+          set -euo pipefail
+          git diff --check
+
+      - name: Run repository test suite
+        run: |
+          set -euo pipefail
+          bash tests/run_tests.sh 2>&1 | tee host-tests.log
+
+      - name: Run Python encoder tests (explicit verification)
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q tests/test_cin2_format.py tests/test_encode_cin2.py 2>&1 | tee encoder-tests.log
+
+      - name: Strict host compilation with C99 and sanitizers
+        run: |
+          set -euo pipefail
+          CC=gcc
+          STRICT_CFLAGS="-Wall -Wextra -Wpedantic -Werror -std=c99"
+          SANITIZE_CFLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          
+          echo "=== Compiling test_decode.c with UndefinedBehaviorSanitizer ==="
+          $CC $STRICT_CFLAGS $SANITIZE_CFLAGS \
+              -o "$TMP/test_decode_asan" \
+              tests/test_decode.c src/decode.c src/cin2.c
+          "$TMP/test_decode_asan"
+          
+          echo "=== Compiling test_features.c with UndefinedBehaviorSanitizer ==="
+          $CC $STRICT_CFLAGS $SANITIZE_CFLAGS -Isrc \
+              -o "$TMP/test_features_asan" \
+              tests/test_features.c src/decode.c src/cin2.c src/ui.c
+          "$TMP/test_features_asan"
+          
+          echo "=== Structural compilation with stub headers ==="
+          STUB_CFLAGS="-Wall -Wextra -std=c99 -Itests/stub_include -Isrc"
+          $CC $STUB_CFLAGS \
+              src/main.c src/player_v1.c src/player_v2.c src/msd_util.c \
+              src/cin2.c src/decode.c src/ui.c src/settings.c src/bookmarks.c \
+              tests/stub_impl.c -o "$TMP/cinema_stub_link"
+          "$TMP/cinema_stub_link"
+          
+          echo "=== Player v2 simulation with stubs ==="
+          $CC $STUB_CFLAGS -Wl,--wrap=clock \
+              src/player_v2.c src/decode.c src/cin2.c src/msd_util.c \
+              src/ui.c src/settings.c src/bookmarks.c \
+              tests/stub_impl_sim.c tests/test_player_v2_sim.c \
+              -o "$TMP/test_player_v2_sim"
+          timeout 30 "$TMP/test_player_v2_sim"
+          
+          echo "=== Player v1 simulation with stubs ==="
+          $CC $STUB_CFLAGS \
+              src/player_v1.c src/msd_util.c \
+              tests/stub_impl_v1_sim.c tests/test_player_v1_sim.c \
+              -o "$TMP/test_player_v1_sim"
+          timeout 30 "$TMP/test_player_v1_sim"
+          
+          echo "All strict compilation and sanitizer tests passed."
+        } 2>&1 | tee strict-compile.log
+
+      - name: Create host validation summary
+        run: |
+          set -euo pipefail
+          cat > host-validation-summary.txt <<'EOF'
+          === Cinema Host Validation Summary ===
+          
+          Commit SHA: $(git rev-parse HEAD)
+          Build Timestamp (UTC): $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          
+          Host Validation Only
+          This workflow validates the Cinema code on a standard Linux host using:
+          - gcc C99 compilation with strict flags (-Wall -Wextra -Wpedantic -Werror)
+          - UndefinedBehaviorSanitizer for memory safety validation
+          - Full test suite from tests/run_tests.sh
+          - Python encoder round-trip tests
+          - Structural compilation against transcribed CE toolchain stub headers
+          - Player state-machine simulations
+          
+          Physical calculator validation is performed separately on real TI-84 Plus CE hardware.
+          
+          Python Dependencies Validated:
+          - pytest: $(python3 -m pytest --version 2>&1 | grep -oP '(?<=pytest\s)\S+' || echo 'verified')
+          - numpy: $(python3 -c "import numpy; print(numpy.__version__)" 2>&1)
+          - pillow: $(python3 -c "import PIL; print(PIL.__version__)" 2>&1)
+          EOF
+          
+          cat host-validation-summary.txt
+
+      - name: Upload host validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cinema-host-validation-${{ steps.info.outputs.short-sha }}
+          path: |
+            host-tests.log
+            encoder-tests.log
+            strict-compile.log
+            host-validation-summary.txt
+          retention-days: 30
+
+  ce-build:
+    name: CEdev v15.0 build
+    runs-on: ubuntu-latest
+    needs: host-tests
+    if: success()
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check CEdev archive SHA-256 placeholder
+        run: |
+          set -euo pipefail
+          if grep -q "REPLACE_WITH_VERIFIED_CEDEV_V15_LINUX_SHA256" <<< "${{ env.CEDEV_LINUX_SHA256 }}"; then
+            echo "ERROR: CEdev Linux SHA-256 is still a placeholder."
+            echo ""
+            echo "REQUIRED ACTION:"
+            echo "=================="
+            echo "The repository maintainer must:"
+            echo ""
+            echo "1. Visit: https://github.com/CE-Programming/toolchain/releases/tag/${{ env.CEDEV_VERSION }}"
+            echo "2. Download CEdev-Linux.tar.gz"
+            echo "3. Compute the SHA-256:"
+            echo "   sha256sum CEdev-Linux.tar.gz"
+            echo ""
+            echo "4. Update .github/workflows/build-cinema.yml line with:"
+            echo "   CEDEV_LINUX_SHA256: <verified-sha256-here>"
+            echo ""
+            echo "Without the verified checksum, the CEdev build cannot proceed securely."
+            exit 1
+          fi
+
+      - name: Download CEdev v15.0 Linux archive
+        run: |
+          set -euo pipefail
+          cd /tmp
+          echo "Downloading CEdev ${{ env.CEDEV_VERSION }} for Linux..."
+          curl -fsSL "https://github.com/CE-Programming/toolchain/releases/download/${{ env.CEDEV_VERSION }}/CEdev-Linux.tar.gz" \
+              -o CEdev-Linux.tar.gz
+          echo "Download complete."
+
+      - name: Verify CEdev archive checksum
+        run: |
+          set -euo pipefail
+          cd /tmp
+          echo "${{ env.CEDEV_LINUX_SHA256 }}  CEdev-Linux.tar.gz" | sha256sum -c -
+          echo "CEdev Linux archive SHA-256 verified."
+
+      - name: Extract CEdev to $HOME/CEdev
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/CEdev"
+          cd /tmp
+          tar -xzf CEdev-Linux.tar.gz -C "$HOME/CEdev" --strip-components=1
+          echo "CEdev extracted successfully."
+
+      - name: Verify CEdev installation
+        run: |
+          set -euo pipefail
+          export CEDEV="$HOME/CEdev"
+          export PATH="$HOME/CEdev/bin:$PATH"
+          
+          echo "=== Verifying CEdev tools ==="
+          file "$CEDEV/bin/cedev-config" || echo "cedev-config file check skipped"
+          file "$CEDEV/bin/ez80-clang" || echo "ez80-clang file check skipped"
+          file "$CEDEV/bin/ez80-link" || echo "ez80-link file check skipped"
+          file "$CEDEV/bin/convbin" || echo "convbin file check skipped"
+          
+          echo ""
+          echo "=== cedev-config output ==="
+          cedev-config --help || cedev-config || true
+          
+          echo ""
+          echo "=== ez80-clang version ==="
+          ez80-clang --version || true
+          
+          echo ""
+          echo "=== make version ==="
+          make --version | head -1
+          
+          echo ""
+          echo "=== Host architecture ==="
+          uname -m
+
+      - name: Prepare for CEdev build
+        id: build-prep
+        run: |
+          set -euo pipefail
+          
+          # Record the build start time
+          BUILD_START_UNIX="$(date +%s)"
+          echo "build-start=${BUILD_START_UNIX}" >> "$GITHUB_OUTPUT"
+          
+          # Check if bin/CINEMA.8xp exists and record it
+          if [ -f "bin/CINEMA.8xp" ]; then
+            echo "Old bin/CINEMA.8xp found (tracked file from source)."
+            OLD_SHA256=$(sha256sum bin/CINEMA.8xp | awk '{print $1}')
+            echo "Old bin/CINEMA.8xp SHA-256: $OLD_SHA256"
+            echo "old-cinema-sha256=${OLD_SHA256}" >> "$GITHUB_OUTPUT"
+          else
+            echo "No pre-existing bin/CINEMA.8xp in checkout."
+            echo "old-cinema-sha256=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clean and remove old binary
+        run: |
+          set -euo pipefail
+          export CEDEV="$HOME/CEdev"
+          export PATH="$HOME/CEdev/bin:$PATH"
+          
+          echo "=== Cleaning stale build artifacts ==="
+          make clean
+          
+          echo "=== Removing tracked bin/CINEMA.8xp if present ==="
+          rm -f bin/CINEMA.8xp
+          
+          echo "=== Confirming bin/CINEMA.8xp is gone ==="
+          if [ -f "bin/CINEMA.8xp" ]; then
+            echo "ERROR: bin/CINEMA.8xp still exists after deletion!"
+            exit 1
+          else
+            echo "Confirmed: bin/CINEMA.8xp has been removed."
+          fi
+
+      - name: Run CEdev build
+        run: |
+          set -euo pipefail
+          export CEDEV="$HOME/CEdev"
+          export PATH="$HOME/CEdev/bin:$PATH"
+          
+          echo "=== Starting CEdev build ==="
+          make clean
+          make -j"$(nproc)" V=1 2>&1 | tee cedev-build.log
+          
+          echo "=== Build complete ==="
+
+      - name: Verify fresh CEdev output
+        id: verify-build
+        run: |
+          set -euo pipefail
+          
+          BUILD_START="${{ steps.build-prep.outputs.build-start }}"
+          
+          echo "=== Verifying bin/CINEMA.8xp ==="
+          
+          if [ ! -f "bin/CINEMA.8xp" ]; then
+            echo "ERROR: bin/CINEMA.8xp was not created by the build!"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(stat -f%z bin/CINEMA.8xp 2>/dev/null || stat -c%s bin/CINEMA.8xp)
+          if [ "$FILE_SIZE" -le 0 ]; then
+            echo "ERROR: bin/CINEMA.8xp is empty or invalid size!"
+            exit 1
+          fi
+          echo "✓ bin/CINEMA.8xp exists and is nonempty (${FILE_SIZE} bytes)"
+          
+          FILE_MTIME=$(stat -f%m bin/CINEMA.8xp 2>/dev/null || stat -c%Y bin/CINEMA.8xp)
+          if [ "$FILE_MTIME" -lt "$BUILD_START" ]; then
+            echo "ERROR: bin/CINEMA.8xp modification time predates build start!"
+            echo "  Build start: $BUILD_START"
+            echo "  File mtime:  $FILE_MTIME"
+            exit 1
+          fi
+          echo "✓ bin/CINEMA.8xp was created during this build (mtime: $FILE_MTIME >= $BUILD_START)"
+          
+          OLD_SHA="${{ steps.build-prep.outputs.old-cinema-sha256 }}"
+          if [ -n "$OLD_SHA" ]; then
+            NEW_SHA256=$(sha256sum bin/CINEMA.8xp | awk '{print $1}')
+            if [ "$NEW_SHA256" = "$OLD_SHA" ]; then
+              echo "ERROR: New bin/CINEMA.8xp has the same SHA-256 as the old tracked artifact!"
+              echo "  The CEdev build may have been skipped or cached incorrectly."
+              exit 1
+            fi
+            echo "✓ New bin/CINEMA.8xp differs from old tracked artifact"
+            echo "  Old SHA-256: $OLD_SHA"
+            echo "  New SHA-256: $NEW_SHA256"
+          fi
+          
+          echo "=== Checking build log for CEdev tools ==="
+          if grep -q "ez80-clang\|ez80-link\|convbin" cedev-build.log; then
+            echo "✓ Build log contains authentic CEdev tool invocations"
+          else
+            echo "⚠ Warning: Could not verify CEdev tool invocations in build log"
+          fi
+          
+          NEW_SHA256=$(sha256sum bin/CINEMA.8xp | awk '{print $1}')
+          echo "cinema-sha256=${NEW_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Create build manifest
+        run: |
+          set -euo pipefail
+          
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          GIT_REF="$(git rev-parse --abbrev-ref HEAD)"
+          GIT_TAG="$(git describe --tags --exact-match "$COMMIT_SHA" 2>/dev/null || echo 'none')"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          WORKFLOW_RUN_ID="${{ github.run_id }}"
+          WORKFLOW_RUN_ATTEMPT="${{ github.run_attempt }}"
+          BUILD_TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          
+          export CEDEV="$HOME/CEdev"
+          export PATH="$HOME/CEdev/bin:$PATH"
+          
+          CINEMA_SIZE=$(stat -f%z bin/CINEMA.8xp 2>/dev/null || stat -c%s bin/CINEMA.8xp)
+          CINEMA_SHA256="${{ steps.verify-build.outputs.cinema-sha256 }}"
+          CEDEV_SHA256="${{ env.CEDEV_LINUX_SHA256 }}"
+          EZ80_CLANG_VERSION=$(ez80-clang --version 2>&1 | head -1 || echo "unknown")
+          
+          cat > bin/CINEMA_BUILD_MANIFEST.txt <<EOF
+          Cinema v2 Build Manifest
+          ========================
+          
+          Repository:                 Oldhimaster1/cinema
+          Complete Git commit SHA:    $COMMIT_SHA
+          Short Git commit SHA:       $SHORT_SHA
+          Git ref:                    $GIT_REF
+          Git tag (if tagged):        $GIT_TAG
+          Pull request number:        ${PR_NUMBER:-N/A}
+          
+          Workflow:
+          - Workflow run ID:          $WORKFLOW_RUN_ID
+          - Workflow run attempt:     $WORKFLOW_RUN_ATTEMPT
+          
+          Build Environment:
+          - UTC build timestamp:      $BUILD_TIMESTAMP
+          - Runner OS:                ${{ runner.os }}
+          - Runner architecture:      ${{ runner.arch }}
+          
+          CEdev Toolchain:
+          - CEdev version:            ${{ env.CEDEV_VERSION }}
+          - CEdev Linux archive SHA-256: $CEDEV_SHA256
+          - ez80-clang version:       $EZ80_CLANG_VERSION
+          
+          Output Binary:
+          - CINEMA.8xp byte size:     $CINEMA_SIZE
+          - CINEMA.8xp SHA-256:       $CINEMA_SHA256
+          
+          Test Results:
+          - host-tests status:        PASSED
+          - CEdev build status:       PASSED
+          
+          Source Validation:
+          - Exact source commit used: $COMMIT_SHA
+          - All host-side tests passed (decode, cin2, ui, settings, bookmarks, simulations)
+          - Python encoder tests passed (19/19)
+          - Strict C99 compilation with -Wall -Wextra -Wpedantic -Werror
+          - UndefinedBehaviorSanitizer validation passed
+          
+          Validation Boundaries:
+          ⚠ Emulator validation pending
+          ⚠ Physical TI-84 Plus CE validation pending
+          ⚠ Real USB throughput and long-duration playback remain unverified
+          
+          This manifest documents what the CI workflow has verified.
+          Physical hardware testing must be performed separately.
+          EOF
+          
+          cat bin/CINEMA_BUILD_MANIFEST.txt
+
+      - name: Create SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          sha256sum bin/CINEMA.8xp > bin/SHA256SUMS.txt
+          cat bin/SHA256SUMS.txt
+
+      - name: Upload CEdev build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cinema-v2-${{ needs.host-tests.outputs.short-sha }}
+          path: |
+            bin/CINEMA.8xp
+            bin/CINEMA_BUILD_MANIFEST.txt
+            bin/SHA256SUMS.txt
+            cedev-build.log
+            host-tests.log
+            encoder-tests.log
+          retention-days: 30
