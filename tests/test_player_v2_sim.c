@@ -145,6 +145,57 @@ static void test_read_error_is_fatal_and_reported(void)
     free(drive);
 }
 
+static void test_single_frame_movie(void)
+{
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(1, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "1-frame header parses");
+
+    g_frames_rendered = 0;
+    g_async_reads = 0;
+    ok = player_v2_run(&global, &header, 0);
+
+    CHECK(ok, "1-frame movie plays to completion");
+    CHECK(g_frames_rendered == 1, "exactly 1 frame rendered");
+    CHECK(g_async_reads == 1, "only 1 read ever queued (3 slots stay empty, never overfilled)");
+
+    free(drive);
+}
+
+static void test_exact_four_frame_movie(void)
+{
+    /* frame_count == SLOT_COUNT: prefill exactly fills every slot with
+     * no frames left to queue afterwards -- the boundary case for
+     * refill_empty_slots' "nothing left to queue" path. */
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(4, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "4-frame header parses");
+
+    g_frames_rendered = 0;
+    g_async_reads = 0;
+    ok = player_v2_run(&global, &header, 0);
+
+    CHECK(ok, "exact 4-frame movie plays to completion");
+    CHECK(g_frames_rendered == 4, "exactly 4 frames rendered");
+    CHECK(g_async_reads == 4, "exactly 4 reads total, none beyond frame_count");
+
+    free(drive);
+}
+
 static void test_empty_movie_rejected(void)
 {
     cin2_header_t header;
@@ -170,6 +221,8 @@ int main(void)
     test_full_playback_no_resume();
     test_resume_starts_mid_movie();
     test_read_error_is_fatal_and_reported();
+    test_single_frame_movie();
+    test_exact_four_frame_movie();
     test_empty_movie_rejected();
 
     if (g_failures == 0) {

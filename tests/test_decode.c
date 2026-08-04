@@ -234,6 +234,21 @@ static void test_crc32_known_vectors(void)
           "crc32 check value for \"123456789\"");
 }
 
+static void test_frame_count_fits_drive(void)
+{
+    /* header sector + frame_count*15 must be <= drive_sectors */
+    CHECK(cin2_frame_count_fits_drive(0, 1), "zero frames always fits (just the header)");
+    CHECK(cin2_frame_count_fits_drive(0, 0) == false, "not even the header sector fits an empty drive");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15), "exact fit is accepted");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15 - 1) == false, "one sector short is rejected");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15 + 1), "drive larger than needed is accepted");
+    /* A hostile/corrupt frame_count near UINT32_MAX must not wrap 32-bit
+     * math into looking small -- this is exactly the case a 64-bit
+     * intermediate is required for. */
+    CHECK(cin2_frame_count_fits_drive(0xFFFFFFFFu, 1000) == false,
+          "huge frame_count against a small drive is rejected, not wrapped");
+}
+
 int main(void)
 {
     test_decode_known_pattern();
@@ -241,6 +256,7 @@ int main(void)
     test_v1_drive_not_detected_as_v2();
     test_resume_round_trip();
     test_crc32_known_vectors();
+    test_frame_count_fits_drive();
 
     if (g_failures == 0) {
         printf("All decode/cin2 tests passed.\n");

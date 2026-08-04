@@ -42,6 +42,14 @@ def frame_lba(frame_number: int) -> int:
     return DATA_LBA + frame_number * FRAME_SECTORS
 
 
+def frame_count_fits_drive(frame_count: int, drive_sectors: int) -> bool:
+    """Mirrors src/cin2.c's cin2_frame_count_fits_drive: true if the
+    header sector plus every frame's FRAME_SECTORS sectors fits within
+    a drive of drive_sectors total logical blocks."""
+    required_sectors = DATA_LBA + frame_count * FRAME_SECTORS
+    return required_sectors <= drive_sectors
+
+
 @dataclass
 class Cin2Header:
     width: int

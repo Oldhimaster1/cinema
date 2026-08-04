@@ -94,6 +94,14 @@ def test_frame_lba_matches_spec():
     assert fmt.frame_lba(2) == 1 + 2 * fmt.FRAME_SECTORS
 
 
+def test_frame_count_fits_drive():
+    assert fmt.frame_count_fits_drive(0, 1)
+    assert not fmt.frame_count_fits_drive(0, 0)
+    assert fmt.frame_count_fits_drive(10, 1 + 10 * fmt.FRAME_SECTORS)
+    assert not fmt.frame_count_fits_drive(10, 1 + 10 * fmt.FRAME_SECTORS - 1)
+    assert not fmt.frame_count_fits_drive(0xFFFFFFFF, 1000)
+
+
 def test_resume_record_round_trip():
     record = fmt.ResumeRecord(frame_count=7200, last_presented_frame=3141)
     raw = fmt.build_resume_record(record)

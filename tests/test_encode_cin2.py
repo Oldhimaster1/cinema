@@ -135,6 +135,67 @@ def test_full_cli_encode_smoke(tmp_path):
 
 
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_encode_is_deterministic(tmp_path):
+    video_path = tmp_path / "testsrc.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=24",
+         str(video_path)],
+        check=True,
+    )
+
+    out1 = tmp_path / "run1.bin"
+    out2 = tmp_path / "run2.bin"
+    enc.main([str(video_path), str(out1), "--fps", "24", "--palette-samples", "8"])
+    enc.main([str(video_path), str(out2), "--fps", "24", "--palette-samples", "8"])
+
+    raw1, raw2 = out1.read_bytes(), out2.read_bytes()
+    assert raw1 == raw2, "two encodes of the same input produced different bytes"
+    import hashlib
+    assert hashlib.sha256(raw1).hexdigest() == hashlib.sha256(raw2).hexdigest()
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_partial_file_never_left_under_final_name_on_failure(tmp_path):
+    """A video ffmpeg can't decode (garbage bytes) must fail cleanly:
+    no file at the requested output path, and no leftover .partial file
+    either -- see encode()'s try/except in tools/encode_cin2.py."""
+    bad_video = tmp_path / "not_a_video.mp4"
+    bad_video.write_bytes(b"this is not a real video file")
+    output_path = tmp_path / "movie.bin"
+
+    with pytest.raises(subprocess.CalledProcessError):
+        enc.main([str(bad_video), str(output_path), "--fps", "24"])
+
+    assert not output_path.exists(), "output must not exist after a failed encode"
+    assert not (tmp_path / "movie.bin.partial").exists(), "partial file must be cleaned up"
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_existing_output_untouched_if_new_encode_fails(tmp_path):
+    """Re-encoding into a path that already holds a valid (perhaps
+    older) CIN2 file must not clobber it if the new encode fails."""
+    video_path = tmp_path / "testsrc.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=24",
+         str(video_path)],
+        check=True,
+    )
+    output_path = tmp_path / "movie.bin"
+    assert enc.main([str(video_path), str(output_path), "--fps", "24"]) == 0
+    original_bytes = output_path.read_bytes()
+
+    bad_video = tmp_path / "not_a_video.mp4"
+    bad_video.write_bytes(b"garbage")
+    with pytest.raises(subprocess.CalledProcessError):
+        enc.main([str(bad_video), str(output_path), "--fps", "24"])
+
+    assert output_path.read_bytes() == original_bytes, \
+        "existing valid output was overwritten by a failed re-encode"
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
 def test_cli_rejects_nonpositive_fps(tmp_path, capsys):
     video_path = tmp_path / "in.mp4"
     video_path.write_bytes(b"not a real video, but argparse should fail first")

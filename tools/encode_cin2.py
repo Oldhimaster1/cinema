@@ -31,6 +31,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cin2_format as fmt  # noqa: E402
+import verify_cin2  # noqa: E402
 
 
 def rgb888_to_rgb565(r: int, g: int, b: int) -> int:
@@ -124,27 +125,50 @@ def quantize_frame(image: Image.Image, palette_image: Image.Image) -> list[int]:
 
 def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
            palette_samples: int, start: Optional[float], duration: Optional[float]) -> None:
-    with tempfile.TemporaryDirectory(prefix="cin2_frames_") as tmp:
-        tmp_dir = Path(tmp)
-        frame_paths = extract_frames(video_path, tmp_dir, fps_num, fps_den, start, duration)
+    """Writes to output_path.with_suffix(output_path.suffix + ".partial")
+    first and only renames it to output_path after the independent
+    verifier (tools/verify_cin2.py) confirms the result is well-formed.
+    A filename ending in the real output name should therefore never
+    exist half-written -- on any failure (ffmpeg error, disk full,
+    permission error, verification failure), the partial file is
+    removed and output_path is left untouched (not created, and not
+    overwritten if it already existed)."""
+    partial_path = output_path.with_name(output_path.name + ".partial")
 
-        sample_step = max(1, len(frame_paths) // max(1, palette_samples))
-        sample_images = [Image.open(p).convert("RGB")
-                          for p in frame_paths[::sample_step][:palette_samples]]
-        palette_image = build_global_palette(sample_images, palette_samples)
-        palette = palette_image_to_rgb565(palette_image)
+    try:
+        with tempfile.TemporaryDirectory(prefix="cin2_frames_") as tmp:
+            tmp_dir = Path(tmp)
+            frame_paths = extract_frames(video_path, tmp_dir, fps_num, fps_den, start, duration)
 
-        header = fmt.Cin2Header(
-            width=fmt.WIDTH, height=fmt.HEIGHT, fps_num=fps_num, fps_den=fps_den,
-            frame_count=len(frame_paths), palette=palette,
-        )
+            sample_step = max(1, len(frame_paths) // max(1, palette_samples))
+            sample_images = [Image.open(p).convert("RGB")
+                              for p in frame_paths[::sample_step][:palette_samples]]
+            palette_image = build_global_palette(sample_images, palette_samples)
+            palette = palette_image_to_rgb565(palette_image)
 
-        with open(output_path, "wb") as out:
-            out.write(fmt.build_header(header))
-            for path in frame_paths:
-                with Image.open(path) as img:
-                    indices = quantize_frame(img, palette_image)
-                out.write(fmt.pack_frame(indices))
+            header = fmt.Cin2Header(
+                width=fmt.WIDTH, height=fmt.HEIGHT, fps_num=fps_num, fps_den=fps_den,
+                frame_count=len(frame_paths), palette=palette,
+            )
+
+            with open(partial_path, "wb") as out:
+                out.write(fmt.build_header(header))
+                for path in frame_paths:
+                    with Image.open(path) as img:
+                        indices = quantize_frame(img, palette_image)
+                    out.write(fmt.pack_frame(indices))
+
+        verify_result = verify_cin2.verify(partial_path)
+        if not verify_result["ok"]:
+            raise RuntimeError(
+                "encoded output failed independent verification: "
+                + "; ".join(verify_result["errors"])
+            )
+
+        partial_path.replace(output_path)
+    except BaseException:
+        partial_path.unlink(missing_ok=True)
+        raise
 
     total_bytes = fmt.HEADER_BYTES + len(frame_paths) * fmt.PACKED_BYTES
     duration_s = len(frame_paths) * fps_den / fps_num

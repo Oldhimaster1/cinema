@@ -47,6 +47,14 @@ static inline uint32_t cin2_frame_lba(uint32_t frame_number)
         + frame_number * (uint32_t)CIN2_FRAME_SECTORS;
 }
 
+/* True if a frame_count-frame movie's data (header sector plus every
+ * frame's 15 sectors) fits entirely within a drive reporting
+ * drive_sectors total logical blocks. Uses 64-bit arithmetic so a
+ * corrupt/hostile frame_count can't wrap 32-bit LBA math into looking
+ * in-bounds. Callers must reject media where this returns false rather
+ * than queueing reads that could run past the reported drive capacity. */
+bool cin2_frame_count_fits_drive(uint32_t frame_count, uint32_t drive_sectors);
+
 /* Standard CRC-32 (IEEE 802.3): poly 0xEDB88320, init/final XOR
  * 0xFFFFFFFF -- the zlib/gzip/PNG variant. */
 uint32_t cin2_crc32(const uint8_t *data, uint32_t length);

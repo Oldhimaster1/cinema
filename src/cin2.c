@@ -46,6 +46,14 @@ uint32_t cin2_crc32(const uint8_t *data, uint32_t length)
     return crc ^ 0xFFFFFFFFu;
 }
 
+bool cin2_frame_count_fits_drive(uint32_t frame_count, uint32_t drive_sectors)
+{
+    uint64_t required_sectors = (uint64_t)CIN2_DATA_LBA
+        + (uint64_t)frame_count * (uint64_t)CIN2_FRAME_SECTORS;
+
+    return required_sectors <= (uint64_t)drive_sectors;
+}
+
 bool cin2_has_magic(const uint8_t *raw)
 {
     return memcmp(raw, CIN2_MAGIC, 4) == 0;

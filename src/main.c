@@ -217,6 +217,11 @@ int main(void)
             putstr("unsupported CIN2 resolution");
             goto msd_error;
         }
+        if (!cin2_frame_count_fits_drive(v2_header.frame_count, msdinfo.bnum))
+        {
+            putstr("movie extends beyond drive capacity");
+            goto msd_error;
+        }
 
         os_ClrHome();
         putstr("Cinema v2 (CIN2) detected");

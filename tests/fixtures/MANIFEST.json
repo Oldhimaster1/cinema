@@ -1,0 +1,186 @@
+{
+  "bad": {
+    "bad_header_crc": {
+      "file": "bad_header_crc.bin",
+      "note": "one CRC byte flipped",
+      "sha256": "e54b19a3d2e139ed829975185b7a8582c37bc7604621b5b3222a82d3198dc387",
+      "size": 31232
+    },
+    "bad_magic": {
+      "file": "bad_magic.bin",
+      "note": "magic changed from CIN2 to CIN1",
+      "sha256": "97088243f5a538e7a0aa9ff468e95224b3a9a07f26ca2fe7593c372b8e2946e7",
+      "size": 31232
+    },
+    "huge_frame_count": {
+      "file": "huge_frame_count.bin",
+      "note": "frame_count=0xFFFFFFFF, correct CRC, no frame data -- required stream extent vastly exceeds the file / any real drive",
+      "sha256": "f5097ab34631b146faa213f9d84b8a4370aeaf9bc8639ea9cafc03003925fb3a",
+      "size": 512
+    },
+    "nonzero_reserved": {
+      "file": "nonzero_reserved.bin",
+      "note": "one reserved byte (offset 100) set nonzero",
+      "sha256": "ae6f94b355965048a62864a5c3232514d77e9b198efd92ecc143241a9748acd8",
+      "size": 31232
+    },
+    "trailing_data": {
+      "file": "trailing_data.bin",
+      "note": "37 stray bytes appended after the last frame (verifier: warning, not failure, on its own -- listed under bad/ here only because it's a malformed-media probe, see tests/test_fixtures.py for the exact expected outcome)",
+      "sha256": "579147bc231bf0a03680c2c6a7646ab10f07067a171640caff975b95e9b47cbb",
+      "size": 31269
+    },
+    "truncated_frame": {
+      "file": "truncated_frame.bin",
+      "note": "header plus half of frame 0's data; frames 1-3 and the rest of frame 0 missing",
+      "sha256": "e5b588346f6f5e61fcd765606635544b6b5bbff1184c1647e51fac003b27926f",
+      "size": 4352
+    },
+    "truncated_header": {
+      "file": "truncated_header.bin",
+      "note": "only 100 of 512 header bytes present",
+      "sha256": "1edc5972106b7045d62fa0fd06327b46268f1c05323efe3de5c2f442195f01e1",
+      "size": 100
+    },
+    "unknown_flags": {
+      "file": "unknown_flags.bin",
+      "note": "flags byte set to 0x01 (also invalidates the CRC, since flags is CRC-covered -- rejection is still due to the flags byte changing)",
+      "sha256": "84aeb202dafe4e4c707ccdeeba3df9ec937ef936ac7925f6f0c634045850cf50",
+      "size": 31232
+    },
+    "unsupported_version": {
+      "file": "unsupported_version.bin",
+      "note": "version byte set to 99",
+      "sha256": "47887c4e4cefc14a5f7812e11f7957de2ce467a5ebddd5a3d471eb63c392a5c3",
+      "size": 31232
+    },
+    "v1_synthetic": {
+      "file": "v1_synthetic.bin",
+      "note": "NOT malformed -- a synthetic v1 (legacy) image: 3 frames, 31 sectors each, radically different palettes per frame, no CIN2 magic. Filed under bad/ only because it's a non-CIN2 fixture the verifier correctly refuses to parse as v2; see PHASE 9 / v1 regression notes in RESULTS.md for how it's actually used.",
+      "sha256": "1f2591bbd5e98d288dbf2d2aa80f2fef6633e5c815cda25560edc4b5331e653e",
+      "size": 47616
+    },
+    "wrong_dimensions_good_crc": {
+      "file": "wrong_dimensions_good_crc.bin",
+      "note": "320x240 (a real but unsupported resolution) with a correct CRC, no frame data",
+      "sha256": "c8e5ddcbb4b42918a9760617b81bd426ebee5b8d8d3f2ec1a15a00a3632833fc",
+      "size": 512
+    },
+    "zero_fps_den": {
+      "file": "zero_fps_den.bin",
+      "note": "fps_den=0 (would divide by zero in the scheduler)",
+      "sha256": "f1ca2fda923979b725f4d0010803caeba8bb580c64f208be700045dc87d4792b",
+      "size": 31232
+    },
+    "zero_fps_num": {
+      "file": "zero_fps_num.bin",
+      "note": "fps_num=0 with a correct CRC",
+      "sha256": "9a710d02e14a0416a8193fc67f1ea6a201d439dd1e5283e08cf16b735a1e1088",
+      "size": 31232
+    },
+    "zero_frame_count": {
+      "file": "zero_frame_count.bin",
+      "note": "frame_count=0, no frame data, correct CRC",
+      "sha256": "c6282433b037936f306faf2b8a2f68202448b7f580b4a07a85a4ff7e30a98e1f",
+      "size": 512
+    },
+    "zero_height_good_crc": {
+      "file": "zero_height_good_crc.bin",
+      "note": "height=0 with a correct CRC",
+      "sha256": "c7739b41b43542eebc42309783ce320fb9dca3ff9b1a22360c29de2aba716305",
+      "size": 31232
+    },
+    "zero_width_good_crc": {
+      "file": "zero_width_good_crc.bin",
+      "note": "width=0 with a correct CRC over the corrupted header -- exercises the dimension check specifically, not the CRC check",
+      "sha256": "8294b4475d5cda1df9bf55bfc9cad3204b843f6383994e747572f18028af59cf",
+      "size": 31232
+    }
+  },
+  "good": {
+    "all_black": {
+      "expected_verifier_ok": true,
+      "file": "all_black.bin",
+      "note": "single frame, every pixel index 0",
+      "sha256": "93f010f195318b053a51197160a2bced5a001ad940d4a39d60dc5ece659abfd5",
+      "size": 8192
+    },
+    "all_max_index": {
+      "expected_verifier_ok": true,
+      "file": "all_max_index.bin",
+      "note": "single frame, every pixel index 15 (0xFF packed bytes)",
+      "sha256": "2c159eff2858a6606b5c11db029801a072d27743a93f9b43fe3f48df03d02bfa",
+      "size": 8192
+    },
+    "alternating_nibbles": {
+      "expected_verifier_ok": true,
+      "file": "alternating_nibbles.bin",
+      "note": "index alternates 0,15,0,15... each row -> packed bytes are all 0x0F",
+      "sha256": "a27f039a96416a223638ae9abaf7afb5177c5c8c881ba13b9ed088f0b198c82d",
+      "size": 8192
+    },
+    "bottom_right_pixel_only": {
+      "expected_verifier_ok": true,
+      "file": "bottom_right_pixel_only.bin",
+      "note": "only the last logical pixel (bottom-right) is nonzero; detects last-pixel/off-by-one edge cases",
+      "sha256": "3716857ef35410264f7978c96bbe7b0f951bbeedbc5482afb7d09ae9b00a3ba1",
+      "size": 8192
+    },
+    "color_bars_16": {
+      "expected_verifier_ok": true,
+      "file": "color_bars_16.bin",
+      "note": "16 vertical bars, one per palette entry",
+      "sha256": "58b40f5e5d1bf57af46376764332d748801d7a94705178cfa05e33fa217c79f7",
+      "size": 8192
+    },
+    "five_frame_movie": {
+      "expected_verifier_ok": true,
+      "file": "five_frame_movie.bin",
+      "note": "exactly 5 frames -- first slot-queue refill after prefill",
+      "sha256": "3e59f4b4d9e1c7f342fb873a1459b8d78c8de17c09e9bd305473af26b275b347",
+      "size": 38912
+    },
+    "four_frame_movie": {
+      "expected_verifier_ok": true,
+      "file": "four_frame_movie.bin",
+      "note": "exactly 4 frames -- matches the player's slot count exactly",
+      "sha256": "fecb4dac4d7b29b71cb4ce741dab22ef88bdd7652a9eeb9813bd313889ffa2dc",
+      "size": 31232
+    },
+    "one_frame_movie": {
+      "expected_verifier_ok": true,
+      "file": "one_frame_movie.bin",
+      "note": "exactly 1 frame -- smallest legal movie",
+      "sha256": "4eba3009b6faab3e68bc781db2f7ae7ac65411808826cde04e9d34860e922507",
+      "size": 8192
+    },
+    "resume_fixture": {
+      "expected_verifier_ok": true,
+      "file": "resume_fixture.bin",
+      "note": "30 frames (1.25s @ 24fps) with a frame-number marker block, for resume-position tests",
+      "sha256": "66cb77763c78fff10095e7747c6de1227466c2b8056cb37d74c4891c057ec4b0",
+      "size": 230912
+    },
+    "short_24000_1001": {
+      "expected_verifier_ok": true,
+      "file": "short_24000_1001.bin",
+      "note": "24 frames @ 24000/1001 = 1.001s; distinct duration from short_24_1",
+      "sha256": "a89d8daafdd681b6913a5fc6d74c73a1c9e15a4ba2452a4d564a7e4f1d454162",
+      "size": 184832
+    },
+    "short_24_1": {
+      "expected_verifier_ok": true,
+      "file": "short_24_1.bin",
+      "note": "24 frames @ 24/1 = exactly 1.0s; frame-number marker block top-left",
+      "sha256": "82fb759c68869d9d50cc28093fdb8731e48f53feca052deec634a16fce2c5ae6",
+      "size": 184832
+    },
+    "unique_pattern_per_row": {
+      "expected_verifier_ok": true,
+      "file": "unique_pattern_per_row.bin",
+      "note": "row y is solid index (y % 16); detects row-stride/vertical placement bugs",
+      "sha256": "ee35e5b0edc0fb32380bc0da25a62c84ff7d7f0efa777fc7ee8211068e335979",
+      "size": 8192
+    }
+  }
+}

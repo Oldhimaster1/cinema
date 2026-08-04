@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+obj/
+bin/CINEMA.map
+bin/CINEMA.obj
