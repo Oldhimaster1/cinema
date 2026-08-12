@@ -165,8 +165,11 @@ bool player_v1_run(global_t *global, uint32_t start_lba)
      * and the exit key is polled once per iteration, matching the
      * original's exact timing so this stays a pure safety/correctness
      * refactor rather than a behavior change. */
+    /* gfx_SetDrawBuffer() is not re-asserted per half below: GraphX
+     * documents it as a persistent mode ("makes graphics routines act
+     * on the non-visible buffer"), not reset by gfx_SwapDraw() -- the
+     * setup calls above already leave it active. */
     while (!os_GetCSC()) {
-        gfx_SetDrawBuffer();
         xfer_image.buffer = &sprite_buffer_2->data;
         xfer_palette.buffer = palette_buffer_2;
 
@@ -195,7 +198,6 @@ bool player_v1_run(global_t *global, uint32_t start_lba)
             goto cleanup;
         }
 
-        gfx_SetDrawBuffer();
         xfer_image.buffer = &sprite_buffer_1->data;
         xfer_palette.buffer = palette_buffer_1;
 

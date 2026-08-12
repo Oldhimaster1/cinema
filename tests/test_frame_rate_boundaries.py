@@ -46,7 +46,13 @@ def test_header_records_requested_rational_fps(tmp_path, fps_arg, fps_num, fps_d
 
 
 @pytest.mark.parametrize("duration_s,fps,expect_frames_between", [
-    (1 / 24 - 0.005, 24, (0, 1)),    # just under one output frame
+    # This source duration is below ffmpeg's practical minimum, so
+    # _make_source's max(duration_s, 0.05) floor applies -- the actual
+    # encoded source is ~0.05s, not ~1/24s, which can round to 1 or 2
+    # output frames depending on ffmpeg's own keyframe/fps-filter
+    # behavior. The property under test (no wild off-by-many) still
+    # holds; the tight (0,1) range from the unfloored duration doesn't.
+    (1 / 24 - 0.005, 24, (0, 2)),    # just under one output frame
     (1 / 24, 24, (1, 2)),            # right at one output frame
     (1 / 24 + 0.02, 24, (1, 2)),     # just over one output frame
     (23 / 24 - 0.01, 24, (22, 24)),  # just under 24 output frames

@@ -237,7 +237,10 @@ static uint32_t desired_frame(const player_v2_t *player, clock_t now)
 
 static void render_frame(frame_slot_t *slot)
 {
-    gfx_SetDrawBuffer();
+    /* No gfx_SetDrawBuffer() here: per GraphX's own documentation,
+     * "makes graphics routines act on the non-visible buffer" is a
+     * persistent mode, not reset by gfx_SwapDraw() -- it only needs to
+     * be set once, which player_v2_run() already does during setup. */
     cinema_draw_packed4_scaled2x(slot->packed, &gfx_vbuffer[0][0],
                                   GFX_LCD_WIDTH, V2_Y_OFFSET);
     gfx_SwapDraw();
