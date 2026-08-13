@@ -81,3 +81,12 @@ void gfx_ScaledSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x,
                               uint8_t y, uint8_t width_scale,
                               uint8_t height_scale)
 { (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale; }
+
+uint8_t gfx_SetColor(uint8_t index) { (void)index; return 0; }
+void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
+                               uint8_t height)
+{ (void)x; (void)y; (void)width; (void)height; }
+uint8_t gfx_SetTextFGColor(uint8_t color) { (void)color; return 0; }
+uint8_t gfx_SetTextBGColor(uint8_t color) { (void)color; return 0; }
+void gfx_PrintStringXY(const char *string, int x, int y)
+{ (void)string; (void)x; (void)y; }

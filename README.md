@@ -46,8 +46,27 @@ the format automatically from the drive.
 1. Run CINEMA on your calculator and insert your prepared USB drive.
 2. If you've watched this movie before, choose to resume or restart.
 3. Playback begins automatically.
-4. **v2:** 2nd pauses/resumes, Clear exits (and saves resume state).
-   **v1:** any key exits.
+
+**v2 controls:**
+
+| Key           | Action                                    |
+|---------------|--------------------------------------------|
+| 2nd / Enter   | Pause / resume                             |
+| Left / Right  | Seek 10s back / forward                    |
+| Up / Down     | Seek 60s forward / back                    |
+| 0             | Restart from the beginning                 |
+| Mode          | Pin the on-screen overlay open/closed      |
+| Clear         | Exit (saves resume state)                  |
+
+A progress bar, elapsed/total time, live FPS, and per-frame decode cost
+appear briefly on any keypress (in the black letterbox bar under the
+video, so it never covers the picture), and stay up if pinned with
+Mode. The decode-cost figure printed on exit and shown live in the
+overlay is the number to watch when judging playback speed -- see
+"Performance" below.
+
+**v1 controls:** any key exits (no pause/seek -- the legacy player is
+kept only for backward compatibility with existing v1 drives).
 
 ## Technical Specifications
 
@@ -58,6 +77,32 @@ the format automatically from the drive.
 | Frame rate       | up to 24fps (any rational rate)   | ~10-11fps (uncapped)  |
 | Bytes/frame      | 7,680 (15 sectors)                 | 15,872 (31 sectors)   |
 | Required throughput @ target fps | ~180 KiB/s @ 24fps    | ~155-170 KiB/s @ 10-11fps |
+
+## Performance
+
+Two build/runtime changes target playback speed directly, both reasoned
+from the eZ80 core's known instruction-set limitations (no barrel
+shifter, no native 32-bit multiply) rather than measured on hardware:
+
+- The build now compiles at `-O3` (the CE Toolchain default is `-Oz`,
+  optimize for *size*). Free performance for a few extra KB of flash.
+- `src/decode.c`'s packed-4-bit-to-2x-scaled blit -- the routine that
+  runs on every displayed frame -- replaced nibble-shift arithmetic
+  with a precomputed lookup table, replaced recomputing the bottom of
+  each 2x-scaled row with copying the top row it duplicates, and
+  replaced a per-row multiply with a running pointer. Verified
+  byte-identical output against an independent reference
+  (`tests/test_decode_cross_check.py`), not just "still passes".
+
+Exit (or the live overlay, or Mode to pin it open) reports the
+player's own measured average decode time per frame and the FPS that
+implies as a ceiling *for the decoder alone* -- e.g. "decode avg: 12.500
+ms (decode ceiling: ~80 fps)" means the blit itself isn't what's
+capping playback if the observed FPS is much lower than that ceiling;
+something else (USB read throughput, `gfx_Wait()`/LCD timing) is. That
+split is what makes further optimization work targeted instead of
+guesswork -- but it has not yet been measured on physical hardware,
+so no FPS number is claimed here as achieved.
 
 ## Known limitations
 

@@ -45,4 +45,14 @@ void gfx_ScaledSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x,
                               uint8_t y, uint8_t width_scale,
                               uint8_t height_scale);
 
+#define gfx_screen ((gfx_buffer_t)0)
+#define gfx_SetDrawScreen() gfx_SetDraw(gfx_screen)
+
+uint8_t gfx_SetColor(uint8_t index);
+void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
+                               uint8_t height);
+uint8_t gfx_SetTextFGColor(uint8_t color);
+uint8_t gfx_SetTextBGColor(uint8_t color);
+void gfx_PrintStringXY(const char *string, int x, int y);
+
 #endif

@@ -10,13 +10,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <tice.h>
 
 /* From tests/stub_impl_sim.c */
 extern void sim_set_drive(const uint8_t *drive, uint32_t sector_count);
 extern void sim_inject_read_failure_at_lba(uint32_t lba);
 extern int sim_get_resume_record(uint8_t *out, size_t out_size);
+extern void sim_inject_key_at_call(int call_index, uint8_t key);
+extern void sim_reset_injected_keys(void);
 extern unsigned g_async_reads;
 extern unsigned g_frames_rendered;
+extern unsigned g_screen_mode_fills;
+extern unsigned g_buffer_mode_fills;
 
 static int g_failures = 0;
 #define CHECK(cond, msg) \
@@ -196,6 +201,66 @@ static void test_exact_four_frame_movie(void)
     free(drive);
 }
 
+static void test_seek_while_paused_resumes_and_jumps_forward(void)
+{
+    /* Regression test for a real bug: seeking while paused used to
+     * update player state (target frame, timeline) without ever
+     * repainting, because the paused path only overlays the OSD onto
+     * whatever's still on screen -- the frame that was actually jumped
+     * to never got shown until playback was separately resumed. The
+     * fix: a seek always clears `paused`. This test drives the real
+     * key-handling switch in player_v2_loop() (not a reimplementation
+     * of it) via injected keys: pause, then seek forward, and checks
+     * that (a) the OSD was drawn onto the visible screen at least once
+     * while paused (proving the pause-overlay path ran at all) and
+     * (b) playback demonstrably jumped ahead rather than playing every
+     * frame linearly, and completed normally afterward. */
+    const uint32_t frame_count = 300;
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(frame_count, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "300-frame header parses");
+
+    sim_reset_injected_keys();
+    /* ~42 os_GetCSC calls per rendered frame at this sim's ~1ms/iteration
+     * pacing against 24fps content -- call 150 lands a few frames in. */
+    sim_inject_key_at_call(150, sk_2nd);   /* pause */
+    sim_inject_key_at_call(200, sk_2nd);   /* re-poke the OSD while still paused */
+    sim_inject_key_at_call(250, sk_Right); /* seek +10s = +240 frames, and resume */
+
+    g_frames_rendered = 0;
+    g_screen_mode_fills = 0;
+    g_buffer_mode_fills = 0;
+
+    ok = player_v2_run(&global, &header, 0);
+
+    CHECK(ok, "playback completes normally after a paused seek");
+    CHECK(g_screen_mode_fills > 0,
+          "OSD was drawn onto the visible screen while paused (the actual fix)");
+    CHECK(g_frames_rendered > 0, "playback continued rendering after the seek");
+    CHECK(g_frames_rendered < frame_count,
+          "the seek skipped content rather than playing all 300 frames linearly");
+
+    {
+        uint8_t raw[CIN2_RESUME_BYTES];
+        int len = sim_get_resume_record(raw, sizeof(raw));
+        cin2_resume_t resume;
+
+        CHECK(len == CIN2_RESUME_BYTES, "resume record written");
+        CHECK(cin2_parse_resume_record(raw, &resume), "resume record parses");
+        CHECK(resume.last_presented_frame == frame_count - 1,
+              "movie still ran to its actual last frame after the mid-playback seek");
+    }
+
+    free(drive);
+}
+
 static void test_empty_movie_rejected(void)
 {
     cin2_header_t header;
@@ -223,6 +288,7 @@ int main(void)
     test_read_error_is_fatal_and_reported();
     test_single_frame_movie();
     test_exact_four_frame_movie();
+    test_seek_while_paused_resumes_and_jumps_forward();
     test_empty_movie_rejected();
 
     if (g_failures == 0) {

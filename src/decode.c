@@ -58,10 +58,21 @@ void cinema_draw_packed4_scaled2x(const uint8_t *packed,
 
     for (y = 0; y < CINEMA_V2_HEIGHT; ++y) {
         uint8_t *row1 = row0 + framebuffer_stride;
+        uint8_t *dst = row0;
         uint16_t pair;
 
+        /* Four explicit stores through a walking destination pointer,
+         * rather than memcpy(dst, expand4[b], 4): at 80 pairs x 96 rows
+         * that is 7,680 calls per frame, and a 4-byte memcpy is all
+         * call overhead. Walking `dst` also drops the `pair * 4` index
+         * multiply from the inner loop. */
         for (pair = 0; pair < CINEMA_V2_WIDTH / 2; ++pair) {
-            memcpy(row0 + pair * 4, expand4[*packed++], 4);
+            const uint8_t *e = expand4[*packed++];
+
+            *dst++ = e[0];
+            *dst++ = e[1];
+            *dst++ = e[2];
+            *dst++ = e[3];
         }
         /* row1 is always an exact duplicate of the row0 we just built
          * (2x vertical scaling): one contiguous block copy instead of

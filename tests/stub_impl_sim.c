@@ -166,15 +166,47 @@ int ti_Seek(int offset, unsigned int origin, uint8_t handle)
 { (void)offset; (void)origin; (void)handle; return 0; }
 
 /* --- tice stub ---------------------------------------------------------
- * os_GetCSC returns 0 (no key) for the whole simulated run, except a
- * hard cap of iterations enforced by the test driver itself (not here)
- * so a logic bug that hangs the scheduler fails the test instead of the
- * test process. */
+ * os_GetCSC returns 0 (no key) by default, except for keys scheduled via
+ * sim_inject_key_at_call (fires once, on the Nth call to os_GetCSC,
+ * counting from 1) -- used to drive control-key sequences (pause, seek)
+ * through the real player_v2_loop() for end-to-end testing. */
+#define SIM_MAX_INJECTED_KEYS 8
+static struct { int call_index; uint8_t key; } g_injected_keys[SIM_MAX_INJECTED_KEYS];
+static int g_injected_key_count = 0;
+static int g_getcsc_calls = 0;
+
+void sim_inject_key_at_call(int call_index, uint8_t key)
+{
+    if (g_injected_key_count < SIM_MAX_INJECTED_KEYS) {
+        g_injected_keys[g_injected_key_count].call_index = call_index;
+        g_injected_keys[g_injected_key_count].key = key;
+        g_injected_key_count++;
+    }
+}
+
+void sim_reset_injected_keys(void)
+{
+    g_injected_key_count = 0;
+    g_getcsc_calls = 0;
+}
+
 void os_SetCursorPos(uint8_t row, uint8_t col) { (void)row; (void)col; }
 void os_PutStrFull(char *str) { printf("[calc] %s", str); }
 void os_NewLine(void) { printf("\n"); }
 void os_ClrHome(void) {}
-uint8_t os_GetCSC(void) { return 0; }
+
+uint8_t os_GetCSC(void)
+{
+    int i;
+
+    g_getcsc_calls++;
+    for (i = 0; i < g_injected_key_count; ++i) {
+        if (g_injected_keys[i].call_index == g_getcsc_calls) {
+            return g_injected_keys[i].key;
+        }
+    }
+    return 0;
+}
 
 /* --- cinema.h's putstr --------------------------------------------
  * Normally defined once in src/main.c; this test links player_v2.c
@@ -186,11 +218,19 @@ void putstr(const char *str) { printf("[calc] %s\n", str); }
 
 unsigned g_frames_rendered = 0;
 
+/* Tracks which target (screen vs offscreen buffer) is currently
+ * selected, and how many rectangle fills landed on each -- lets tests
+ * confirm the paused-OSD-overlay path really does target gfx_screen
+ * (via gfx_SetDrawScreen()) rather than the offscreen buffer. */
+static gfx_buffer_t g_draw_mode = gfx_buffer;
+unsigned g_screen_mode_fills = 0;
+unsigned g_buffer_mode_fills = 0;
+
 void gfx_Begin(void) {}
 void gfx_End(void) {}
 void gfx_SwapDraw(void) {}
 void gfx_Wait(void) { g_frames_rendered++; }
-void gfx_SetDraw(gfx_buffer_t mode) { (void)mode; }
+void gfx_SetDraw(gfx_buffer_t mode) { g_draw_mode = mode; }
 void gfx_ZeroScreen(void) {}
 void gfx_SetPalette(const void *palette, uint24_t size, uint8_t offset)
 { (void)palette; (void)size; (void)offset; }
@@ -216,3 +256,19 @@ int sim_get_resume_record(uint8_t *out, size_t out_size)
     memcpy(out, g_appvar_data, g_appvar_len);
     return (int)g_appvar_len;
 }
+
+uint8_t gfx_SetColor(uint8_t index) { (void)index; return 0; }
+void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
+                               uint8_t height)
+{
+    (void)x; (void)y; (void)width; (void)height;
+    if (g_draw_mode == gfx_screen) {
+        g_screen_mode_fills++;
+    } else {
+        g_buffer_mode_fills++;
+    }
+}
+uint8_t gfx_SetTextFGColor(uint8_t color) { (void)color; return 0; }
+uint8_t gfx_SetTextBGColor(uint8_t color) { (void)color; return 0; }
+void gfx_PrintStringXY(const char *string, int x, int y)
+{ (void)string; (void)x; (void)y; }

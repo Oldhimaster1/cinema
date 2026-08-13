@@ -164,3 +164,12 @@ int sim_get_appvar(uint8_t *out, size_t out_size)
     memcpy(out, g_appvar_data, g_appvar_len);
     return (int)g_appvar_len;
 }
+
+uint8_t gfx_SetColor(uint8_t index) { (void)index; return 0; }
+void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
+                               uint8_t height)
+{ (void)x; (void)y; (void)width; (void)height; }
+uint8_t gfx_SetTextFGColor(uint8_t color) { (void)color; return 0; }
+uint8_t gfx_SetTextBGColor(uint8_t color) { (void)color; return 0; }
+void gfx_PrintStringXY(const char *string, int x, int y)
+{ (void)string; (void)x; (void)y; }
