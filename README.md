@@ -25,10 +25,15 @@ Cinema now supports two on-disk formats, auto-detected from the drive:
    pip install pillow
    python3 tools/encode_cin2.py input.mp4 output.bin --fps 24
    ```
-   Requires `ffmpeg` on your PATH. Use `--fps 24000/1001` for
-   film-rate content, `--start`/`--duration` to trim, and
-   `--palette-samples` to control how many frames are sampled when
-   building the movie's global 16-color palette (see `--help`).
+   Requires `ffmpeg` on your PATH. `tools/encode_cin2.py` is a single
+   self-contained script -- no sibling files needed, copy just that one
+   file anywhere. It decodes the source once via a raw pipe (no PNG
+   round-trip) and quantizes frames in parallel across all CPU cores by
+   default (`--jobs N` to control that, `--jobs 1` for single-threaded).
+   Use `--fps 24000/1001` for film-rate content, `--start`/`--duration`
+   to trim, and `--palette-samples` to control how many frames are
+   sampled when building the movie's global 16-color palette (see
+   `--help`).
 3. **Write to thumb drive**, starting at byte 0 / LBA 0, e.g.
    `sudo dd if=output.bin of=/dev/sdX bs=1M conv=fsync` (Linux/macOS) or
    [HDD Raw Copy Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/)
