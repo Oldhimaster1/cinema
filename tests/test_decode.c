@@ -200,12 +200,27 @@ static void test_resume_round_trip(void)
 
     in.frame_count = 7200;
     in.last_presented_frame = 3141;
+    strcpy(in.filename, "MOVIE01.BIN");
 
     cin2_build_resume_record(raw, &in);
     CHECK(cin2_parse_resume_record(raw, &out), "resume record parses");
     CHECK(out.frame_count == in.frame_count, "resume frame_count round-trips");
     CHECK(out.last_presented_frame == in.last_presented_frame,
           "resume last_presented_frame round-trips");
+    CHECK(strcmp(out.filename, in.filename) == 0, "resume filename round-trips");
+
+    {
+        /* Empty filename (raw single-image mode) round-trips too. */
+        cin2_resume_t raw_mode_in, raw_mode_out;
+
+        raw_mode_in.frame_count = 100;
+        raw_mode_in.last_presented_frame = 50;
+        raw_mode_in.filename[0] = '\0';
+
+        cin2_build_resume_record(raw, &raw_mode_in);
+        CHECK(cin2_parse_resume_record(raw, &raw_mode_out), "raw-mode (empty filename) record parses");
+        CHECK(raw_mode_out.filename[0] == '\0', "empty filename round-trips as empty");
+    }
 
     for (i = 0; i < CIN2_RESUME_BYTES; ++i) {
         uint8_t corrupt[CIN2_RESUME_BYTES];

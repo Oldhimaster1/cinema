@@ -103,13 +103,35 @@ def test_frame_count_fits_drive():
 
 
 def test_resume_record_round_trip():
-    record = fmt.ResumeRecord(frame_count=7200, last_presented_frame=3141)
+    record = fmt.ResumeRecord(frame_count=7200, last_presented_frame=3141,
+                               filename="MOVIE01.BIN")
     raw = fmt.build_resume_record(record)
     assert len(raw) == fmt.RESUME_BYTES
 
     parsed = fmt.parse_resume_record(raw)
     assert parsed.frame_count == record.frame_count
     assert parsed.last_presented_frame == record.last_presented_frame
+    assert parsed.filename == record.filename
+
+
+def test_resume_record_round_trip_empty_filename():
+    # "" is the raw whole-device-image mode's identity.
+    record = fmt.ResumeRecord(frame_count=42, last_presented_frame=10, filename="")
+    raw = fmt.build_resume_record(record)
+
+    parsed = fmt.parse_resume_record(raw)
+    assert parsed.filename == ""
+
+
+def test_resume_record_truncates_long_filename():
+    # RESUME_FILENAME_LEN is 13 (8.3 short name + NUL); anything longer
+    # must be truncated rather than overflowing the fixed-size field.
+    long_name = "THISNAMEISWAYTOOLONG.BIN"
+    record = fmt.ResumeRecord(frame_count=1, last_presented_frame=0, filename=long_name)
+    raw = fmt.build_resume_record(record)
+
+    parsed = fmt.parse_resume_record(raw)
+    assert parsed.filename == long_name[: fmt.RESUME_FILENAME_LEN - 1]
 
 
 def test_resume_record_rejects_corruption():

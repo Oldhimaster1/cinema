@@ -89,7 +89,7 @@ row padding -- row `y` starts immediately at byte `y * width / 2`.
 
 ## Resume record (TI AppVar `SSCINEV2`)
 
-Written on exit, read on the "resume?" prompt. 20 bytes, all
+Written on exit, read on the "resume?" prompt. 33 bytes, all
 little-endian:
 
 | Offset | Size | Field                  |
@@ -99,7 +99,8 @@ little-endian:
 | 5      | 3    | reserved (zero)         |
 | 8      | 4    | `frame_count`           |
 | 12     | 4    | `last_presented_frame`  |
-| 16     | 4    | `record_crc32` (over bytes `[0, 16)`) |
+| 16     | 13   | `filename` (NUL-terminated short name, `""` for raw whole-device-image mode) |
+| 29     | 4    | `record_crc32` (over bytes `[0, 29)`) |
 
 `frame_count` is stored so a resume record from a *different* movie (or a
 re-encoded one with a different length) is detected and discarded rather
@@ -107,6 +108,17 @@ than silently seeking to a frame number that may not exist, or that
 exists but belongs to different content. `last_presented_frame` -- not
 the read-ahead/queue position -- is what gets saved, since the read-ahead
 queue can be several frames ahead of what was actually shown.
+
+`filename` exists because a FAT32 drive can hold more than one movie:
+`frame_count` alone isn't a reliable "same movie" check, since two
+different files could coincidentally have the same frame count. The
+player compares both the stored `filename` and `frame_count` against the
+file currently being opened before offering to resume into it. It holds
+the file's short (8.3) name as reported by the FAT32 directory listing,
+truncated to 12 characters plus a NUL if longer. Raw whole-device-image
+playback (no FAT32 filesystem, movie image written directly to the drive)
+has no filename, so it stores `""` and only `frame_count` is checked in
+that mode, matching the original v2 behavior.
 
 This is a distinct AppVar from the original `SSCINEMA` (which stores a
 raw 4-byte LBA for the v1 format) so v1 and v2 resume state never collide

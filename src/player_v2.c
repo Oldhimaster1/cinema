@@ -1,5 +1,6 @@
 #include "player_v2.h"
 #include "decode.h"
+#include "fat32ro.h"
 #include "msd_util.h"
 
 #include <fileioc.h>
@@ -38,12 +39,29 @@
 #define V2_SEEK_SMALL 10
 #define V2_SEEK_LARGE 60
 
+/* A frame's data normally comes from one contiguous run of sectors, but
+ * when the movie is a file on a FAT32 drive (see src/fat32ro.h) rather
+ * than a raw whole-device image, a fragmented file can split a single
+ * frame's sectors across more than one extent. CINEMA_MAX_PARTS_PER_FRAME
+ * bounds how many separate reads one frame can require; a frame needing
+ * more than this is a "too fragmented to play" condition, reported as an
+ * error rather than silently reading the wrong data or growing the slot
+ * structure unboundedly. In practice a contiguous (or lightly
+ * fragmented) file needs exactly 1. */
+#define CINEMA_MAX_PARTS_PER_FRAME 4
+
 typedef enum {
     SLOT_EMPTY,
     SLOT_LOADING,
+    SLOT_NEEDS_NEXT_PART, /* previous part done; another part remains to queue */
     SLOT_READY,
     SLOT_ERROR
 } slot_state_t;
+
+typedef struct {
+    uint32_t lba;
+    uint32_t sectors;
+} frame_part_t;
 
 typedef struct {
     uint8_t packed[CINEMA_V2_PACKED_BYTES];
@@ -51,11 +69,23 @@ typedef struct {
     volatile slot_state_t state;
     volatile msd_error_t error;
     msd_transfer_t transfer;
+
+    /* Resolved once, when the frame is first queued (see
+     * resolve_frame_parts), then serviced one at a time: the completion
+     * callback only ever records state (see frame_read_callback), so
+     * queueing the *next* part happens from the main loop (in
+     * refill_empty_slots), the same place new frames get queued. */
+    frame_part_t pending_parts[CINEMA_MAX_PARTS_PER_FRAME];
+    uint8_t pending_part_count;
+    uint8_t next_pending_part;
 } frame_slot_t;
 
 typedef struct {
     global_t *global;
+    const fat32ro_extent_map_t *movie_map;
     frame_slot_t slots[SLOT_COUNT];
+
+    char filename[CIN2_RESUME_FILENAME_LEN]; /* "" for raw single-image mode */
 
     uint32_t next_frame_to_queue;
     uint32_t frame_count;
@@ -90,31 +120,85 @@ typedef struct {
 } player_v2_t;
 
 /* Callback only records what happened -- no graphics calls, no printing,
- * no LBA math. The main loop decides what any of it means. */
+ * no LBA math, and (per the comment on pending_parts above) no queueing
+ * of the next part either. The main loop decides what any of it means. */
 static void frame_read_callback(msd_error_t error, struct msd_transfer *xfer)
 {
     frame_slot_t *slot = (frame_slot_t *)xfer->userptr;
 
     slot->error = error;
-    slot->state = (error == MSD_SUCCESS) ? SLOT_READY : SLOT_ERROR;
+    if (error != MSD_SUCCESS) {
+        slot->state = SLOT_ERROR;
+        return;
+    }
+
+    slot->next_pending_part++;
+    slot->state = (slot->next_pending_part >= slot->pending_part_count)
+        ? SLOT_READY : SLOT_NEEDS_NEXT_PART;
 }
 
-static msd_error_t queue_frame(global_t *global, frame_slot_t *slot,
-                                uint32_t frame_number)
+/* Splits frame_number's CIN2_FRAME_SECTORS-sector range into parts via
+ * the movie's extent map, capped at CINEMA_MAX_PARTS_PER_FRAME. False
+ * means the frame can't be resolved at all: either it needs more parts
+ * than that bound (a pathologically fragmented file), or it reaches
+ * past the mapped extent (which should not happen for any frame within
+ * a header's own frame_count, since the map is sized to the file's
+ * declared length -- checked here anyway rather than trusting that). */
+static bool resolve_frame_parts(const fat32ro_extent_map_t *map, uint32_t frame_number,
+                                 frame_slot_t *slot)
 {
+    uint32_t sector_offset = cin2_frame_lba(frame_number);
+    uint32_t remaining = CIN2_FRAME_SECTORS;
+    uint8_t count = 0;
+
+    while (remaining > 0) {
+        uint32_t lba, run;
+
+        if (count >= CINEMA_MAX_PARTS_PER_FRAME) {
+            return false;
+        }
+        if (!fat32ro_extent_lookup(map, sector_offset, &lba, &run)) {
+            return false;
+        }
+        if (run > remaining) {
+            run = remaining;
+        }
+
+        slot->pending_parts[count].lba = lba;
+        slot->pending_parts[count].sectors = run;
+        count++;
+
+        sector_offset += run;
+        remaining -= run;
+    }
+
+    slot->pending_part_count = count;
+    slot->next_pending_part = 0;
+    return true;
+}
+
+/* Queues slot->pending_parts[slot->next_pending_part] -- either the
+ * first part of a freshly resolved frame, or the next part of one
+ * already in progress (SLOT_NEEDS_NEXT_PART). */
+static msd_error_t queue_slot_part(global_t *global, frame_slot_t *slot)
+{
+    uint8_t idx = slot->next_pending_part;
+    uint32_t byte_offset = 0;
+    uint8_t i;
     msd_error_t result;
 
-    slot->frame_number = frame_number;
-    slot->error = MSD_SUCCESS;
-    slot->state = SLOT_LOADING;
+    for (i = 0; i < idx; ++i) {
+        byte_offset += slot->pending_parts[i].sectors * FAT32RO_SECTOR_BYTES;
+    }
 
     slot->transfer.msd = &global->msd;
-    slot->transfer.lba = cin2_frame_lba(frame_number);
-    slot->transfer.count = CIN2_FRAME_SECTORS;
-    slot->transfer.buffer = slot->packed;
+    slot->transfer.lba = slot->pending_parts[idx].lba;
+    slot->transfer.count = slot->pending_parts[idx].sectors;
+    slot->transfer.buffer = slot->packed + byte_offset;
     slot->transfer.callback = frame_read_callback;
     slot->transfer.userptr = slot;
 
+    slot->state = SLOT_LOADING;
     result = msd_ReadAsync(&slot->transfer);
     if (result != MSD_SUCCESS) {
         slot->error = result;
@@ -124,16 +208,41 @@ static msd_error_t queue_frame(global_t *global, frame_slot_t *slot,
     return result;
 }
 
-/* Queues the next not-yet-read frame into every SLOT_EMPTY slot. Returns
- * false only if msd_ReadAsync itself failed to queue (not if a
- * previously-queued transfer later errors out -- that's caught via
- * find_failed_slot in the main loop). */
+static msd_error_t queue_frame(global_t *global, const fat32ro_extent_map_t *map,
+                                frame_slot_t *slot, uint32_t frame_number)
+{
+    slot->frame_number = frame_number;
+    slot->error = MSD_SUCCESS;
+
+    if (!resolve_frame_parts(map, frame_number, slot)) {
+        slot->error = MSD_ERROR_INVALID_PARAM;
+        slot->state = SLOT_ERROR;
+        return MSD_ERROR_INVALID_PARAM;
+    }
+
+    return queue_slot_part(global, slot);
+}
+
+/* Queues the next not-yet-read frame into every SLOT_EMPTY slot, and
+ * queues the next part of every SLOT_NEEDS_NEXT_PART slot (a frame
+ * that's split across a fragmentation boundary -- see
+ * CINEMA_MAX_PARTS_PER_FRAME). Returns false only if msd_ReadAsync
+ * itself failed to queue, or a frame couldn't be resolved to sectors at
+ * all (not if a previously-queued transfer later errors out -- that's
+ * caught via find_failed_slot in the main loop). */
 static bool refill_empty_slots(player_v2_t *player)
 {
     uint8_t i;
 
     for (i = 0; i < SLOT_COUNT; ++i) {
         frame_slot_t *slot = &player->slots[i];
+
+        if (slot->state == SLOT_NEEDS_NEXT_PART) {
+            if (queue_slot_part(player->global, slot) != MSD_SUCCESS) {
+                return false;
+            }
+            continue;
+        }
 
         if (slot->state != SLOT_EMPTY) {
             continue;
@@ -142,8 +251,8 @@ static bool refill_empty_slots(player_v2_t *player)
             continue;
         }
 
-        if (queue_frame(player->global, slot, player->next_frame_to_queue)
-            != MSD_SUCCESS) {
+        if (queue_frame(player->global, player->movie_map, slot,
+                         player->next_frame_to_queue) != MSD_SUCCESS) {
             return false;
         }
         player->next_frame_to_queue++;
@@ -170,7 +279,9 @@ static bool all_queued_slots_resolved(player_v2_t *player)
     uint8_t i;
 
     for (i = 0; i < SLOT_COUNT; ++i) {
-        if (player->slots[i].state == SLOT_LOADING) {
+        slot_state_t state = player->slots[i].state;
+
+        if (state == SLOT_LOADING || state == SLOT_NEEDS_NEXT_PART) {
             return false;
         }
     }
@@ -201,6 +312,13 @@ static bool prefill_frames(player_v2_t *player)
                 put_msd_error(failed->error, "prefill");
                 return false;
             }
+        }
+        /* A slot that just finished one part of a multi-part
+         * (fragmented-file) frame is sitting in SLOT_NEEDS_NEXT_PART --
+         * without this, it would never progress during prefill. */
+        if (!refill_empty_slots(player)) {
+            putstr("error queueing msd (prefill)");
+            return false;
         }
         if (os_GetCSC()) {
             return false;
@@ -545,6 +663,7 @@ static void save_resume_state(const player_v2_t *player)
 
         state.frame_count = player->frame_count;
         state.last_presented_frame = player->last_frame_presented;
+        memcpy(state.filename, player->filename, sizeof(state.filename));
         cin2_build_resume_record(raw, &state);
 
         ti_SetGCBehavior(NULL, NULL);
@@ -722,7 +841,8 @@ static bool player_v2_loop(player_v2_t *player)
 }
 
 bool player_v2_run(global_t *global, const cin2_header_t *header,
-                    uint32_t start_frame)
+                    uint32_t start_frame, const fat32ro_extent_map_t *movie_map,
+                    const char *filename)
 {
     static player_v2_t player;
     bool graphics_active = false;
@@ -735,6 +855,16 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
 
     memset(&player, 0, sizeof(player));
     player.global = global;
+    player.movie_map = movie_map;
+    {
+        size_t name_len = strlen(filename);
+
+        if (name_len >= sizeof(player.filename)) {
+            name_len = sizeof(player.filename) - 1;
+        }
+        memcpy(player.filename, filename, name_len);
+        player.filename[name_len] = '\0';
+    }
     player.frame_count = header->frame_count;
     player.fps_num = header->fps_num;
     player.fps_den = header->fps_den;

@@ -19,8 +19,14 @@ Cinema now supports two on-disk formats, auto-detected from the drive:
 
 ## Installation Instructions (v2 / 24fps)
 
-1. **Prepare your USB drive** -- unformat and wipe it completely.
-2. **Encode your video:**
+Cinema reads movie files directly off a normally-formatted FAT32 USB
+drive, so **multiple movies can live on one drive** as separate files --
+no need to dedicate a whole drive to a single video.
+
+1. **Format your USB drive as FAT32** (a drive fresh out of the packaging,
+   or reformatted in Windows/macOS/Linux as usual, works fine -- no
+   special tooling needed).
+2. **Encode your video(s):**
    ```
    pip install pillow
    python3 tools/encode_cin2.py input.mp4 output.bin --fps 24
@@ -34,11 +40,21 @@ Cinema now supports two on-disk formats, auto-detected from the drive:
    to trim, and `--palette-samples` to control how many frames are
    sampled when building the movie's global 16-color palette (see
    `--help`).
-3. **Write to thumb drive**, starting at byte 0 / LBA 0, e.g.
-   `sudo dd if=output.bin of=/dev/sdX bs=1M conv=fsync` (Linux/macOS) or
-   [HDD Raw Copy Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/)
-   (Windows).
+3. **Copy the output file(s) onto the drive**, in the root folder, with
+   a `.bin` or `.cin` extension (either works -- the extension is only
+   used to tell movie files apart from anything else on the drive, e.g.
+   `movie1.bin`, `movie2.cin`). Copy as many as you like.
 4. **Install on calculator** -- transfer `CINEMA.8xp` to your TI-84 Plus CE.
+
+### Raw whole-device image (legacy / fallback)
+
+If a drive has no FAT32 filesystem at all (e.g. wiped with `dd` and never
+formatted), Cinema falls back to the original raw-image mode: write a
+single `.bin` straight to the start of the device (`sudo dd if=output.bin
+of=/dev/sdX bs=1M conv=fsync` on Linux/macOS, or [HDD Raw Copy
+Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/) on Windows) and
+Cinema plays that one movie directly. This only supports a single movie
+per drive -- prefer the FAT32 workflow above for anything else.
 
 ### v1 (legacy) drives
 
@@ -49,8 +65,19 @@ the format automatically from the drive.
 ## Usage
 
 1. Run CINEMA on your calculator and insert your prepared USB drive.
-2. If you've watched this movie before, choose to resume or restart.
-3. Playback begins automatically.
+2. On a FAT32 drive, pick a movie from the on-screen list (Up/Down to
+   move, Enter to select, Clear to exit) -- shown even if there's only
+   one file, so you always see what's on the drive.
+3. If you've watched this movie before, choose to resume or restart.
+4. Playback begins automatically.
+
+**File browser controls (FAT32 drives only):**
+
+| Key           | Action                                    |
+|---------------|--------------------------------------------|
+| Up / Down     | Move the selection                         |
+| Enter / 2nd   | Play the selected movie                    |
+| Clear         | Exit without playing anything              |
 
 **v2 controls:**
 
@@ -123,6 +150,14 @@ so no FPS number is claimed here as achieved.
 - The v2 encoder targets 160x96 only, matching the calculator-side
   decoder; both would need to change together to support another
   resolution.
+- The FAT32 file browser only looks in the drive's root folder, and only
+  reads short (8.3) filenames -- long filenames still show up (FAT32
+  always stores a short name alongside a long one) but any name-mangling
+  applied by the OS that formatted the drive is what you'll see on the
+  calculator. Movies inside subfolders aren't listed. Up to 32 playable
+  files and up to 256 cluster-chain extents per movie (i.e. a very
+  fragmented file on a nearly-full drive) are supported; anything beyond
+  those limits is reported as an error rather than silently truncated.
 
 ## Development / tests
 

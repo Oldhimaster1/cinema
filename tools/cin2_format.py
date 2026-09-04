@@ -28,7 +28,8 @@ HEIGHT = 96
 PACKED_BYTES = (WIDTH * HEIGHT) // 2
 
 RESUME_MAGIC = b"CR2S"
-RESUME_BYTES = 20
+RESUME_BYTES = 33
+RESUME_FILENAME_LEN = 13
 
 
 def crc32(data: bytes) -> int:
@@ -139,15 +140,24 @@ def unpack_frame(packed: bytes) -> list[int]:
 class ResumeRecord:
     frame_count: int
     last_presented_frame: int
+    # NUL-terminated short filename this resume position applies to, or ""
+    # for the raw whole-device-image mode. Needed because a FAT32 drive can
+    # hold more than one movie -- frame_count alone isn't enough to tell
+    # whether a saved resume position belongs to the file currently being
+    # opened (two different movies could coincidentally share a frame count).
+    filename: str = ""
 
 
 def build_resume_record(record: ResumeRecord) -> bytes:
+    name_bytes = record.filename.encode("ascii")[: RESUME_FILENAME_LEN - 1]
+
     buf = bytearray(RESUME_BYTES)
     buf[0:4] = RESUME_MAGIC
     buf[4] = VERSION
     struct.pack_into("<L", buf, 8, record.frame_count)
     struct.pack_into("<L", buf, 12, record.last_presented_frame)
-    struct.pack_into("<L", buf, 16, crc32(bytes(buf[:16])))
+    buf[16:16 + len(name_bytes)] = name_bytes
+    struct.pack_into("<L", buf, 29, crc32(bytes(buf[:29])))
     return bytes(buf)
 
 
@@ -159,10 +169,16 @@ def parse_resume_record(raw: bytes) -> ResumeRecord:
     if raw[4] != VERSION:
         raise ValueError(f"unsupported resume version {raw[4]}")
 
-    stored_crc = struct.unpack_from("<L", raw, 16)[0]
-    computed_crc = crc32(raw[:16])
+    stored_crc = struct.unpack_from("<L", raw, 29)[0]
+    computed_crc = crc32(raw[:29])
     if stored_crc != computed_crc:
         raise ValueError("bad resume record CRC")
 
     frame_count, last_presented_frame = struct.unpack_from("<LL", raw, 8)
-    return ResumeRecord(frame_count=frame_count, last_presented_frame=last_presented_frame)
+    name_field = bytes(raw[16:16 + RESUME_FILENAME_LEN - 1])
+    filename = name_field.split(b"\x00", 1)[0].decode("ascii")
+    return ResumeRecord(
+        frame_count=frame_count,
+        last_presented_frame=last_presented_frame,
+        filename=filename,
+    )

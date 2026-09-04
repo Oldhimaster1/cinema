@@ -117,12 +117,26 @@ void cin2_build_header(uint8_t *raw, const cin2_header_t *header)
 
 void cin2_build_resume_record(uint8_t *raw, const cin2_resume_t *state)
 {
+    /* Bounded scan rather than strlen(): state->filename is a fixed
+     * CIN2_RESUME_FILENAME_LEN-byte array, and nothing guarantees it is
+     * NUL-terminated within that span, so an unbounded strlen() could
+     * read past it. */
+    size_t name_len = 0;
+
+    while (name_len < CIN2_RESUME_FILENAME_LEN && state->filename[name_len] != '\0') {
+        ++name_len;
+    }
+    if (name_len >= CIN2_RESUME_FILENAME_LEN) {
+        name_len = CIN2_RESUME_FILENAME_LEN - 1;
+    }
+
     memset(raw, 0, CIN2_RESUME_BYTES);
     memcpy(raw, "CR2S", 4);
     raw[4] = CIN2_VERSION;
     write_u32le(raw + 8, state->frame_count);
     write_u32le(raw + 12, state->last_presented_frame);
-    write_u32le(raw + 16, cin2_crc32(raw, 16));
+    memcpy(raw + 16, state->filename, name_len); /* remainder already zeroed above */
+    write_u32le(raw + 29, cin2_crc32(raw, 29));
 }
 
 bool cin2_parse_resume_record(const uint8_t *raw, cin2_resume_t *out)
@@ -137,14 +151,16 @@ bool cin2_parse_resume_record(const uint8_t *raw, cin2_resume_t *out)
         return false;
     }
 
-    stored_crc = read_u32le(raw + 16);
-    computed_crc = cin2_crc32(raw, 16);
+    stored_crc = read_u32le(raw + 29);
+    computed_crc = cin2_crc32(raw, 29);
     if (stored_crc != computed_crc) {
         return false;
     }
 
     out->frame_count = read_u32le(raw + 8);
     out->last_presented_frame = read_u32le(raw + 12);
+    memcpy(out->filename, raw + 16, CIN2_RESUME_FILENAME_LEN - 1);
+    out->filename[CIN2_RESUME_FILENAME_LEN - 1] = '\0';
 
     return true;
 }

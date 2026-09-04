@@ -59,12 +59,25 @@ bool cin2_frame_count_fits_drive(uint32_t frame_count, uint32_t drive_sectors);
  * 0xFFFFFFFF -- the zlib/gzip/PNG variant. */
 uint32_t cin2_crc32(const uint8_t *data, uint32_t length);
 
-/* Resume record (AppVar SSCINEV2), see docs/CIN2_FORMAT.md. */
-#define CIN2_RESUME_BYTES 20
+/* Resume record (AppVar SSCINEV2), see docs/CIN2_FORMAT.md.
+ *
+ * filename identifies which movie this record belongs to: with a FAT32
+ * drive potentially holding several movies (see src/fat32ro.h), two
+ * different files can easily share the same frame_count by coincidence,
+ * so frame_count alone is no longer sufficient to tell "resume this
+ * movie" from "resume a different one that happens to have the same
+ * length". For the raw single-whole-device-image mode (no filesystem,
+ * one movie per drive) filename is simply empty on both the saved and
+ * compared side, which preserves that mode's original frame_count-only
+ * behavior exactly. filename is a NUL-terminated short-name string (see
+ * fat32ro_dirent_t.name), truncated to fit if longer. */
+#define CIN2_RESUME_BYTES        33
+#define CIN2_RESUME_FILENAME_LEN 13
 
 typedef struct {
     uint32_t frame_count;
     uint32_t last_presented_frame;
+    char filename[CIN2_RESUME_FILENAME_LEN]; /* NUL-terminated, "" for raw mode */
 } cin2_resume_t;
 
 void cin2_build_resume_record(uint8_t *raw, const cin2_resume_t *state);

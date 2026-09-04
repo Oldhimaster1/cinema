@@ -3,6 +3,7 @@
  * tests/stub_impl_sim.c instead of real hardware. See that file's
  * header comment for how msd_ReadAsync/clock() are simulated. */
 #include "../src/cin2.h"
+#include "../src/fat32ro.h"
 #include "../src/player_v2.h"
 #include "../src/decode.h"
 
@@ -22,6 +23,21 @@ extern unsigned g_async_reads;
 extern unsigned g_frames_rendered;
 extern unsigned g_screen_mode_fills;
 extern unsigned g_buffer_mode_fills;
+
+/* All these tests use a raw single-image synthetic drive (see
+ * build_synthetic_drive below), so movie_map is always the identity
+ * mapping: file-relative sector N lives at device LBA N. */
+static fat32ro_extent_map_t identity_map(uint32_t sectors)
+{
+    fat32ro_extent_map_t map;
+
+    memset(&map, 0, sizeof(map));
+    map.extent_count = 1;
+    map.extents[0].lba = 0;
+    map.extents[0].sectors = sectors;
+    map.total_sectors = sectors;
+    return map;
+}
 
 static int g_failures = 0;
 #define CHECK(cond, msg) \
@@ -81,7 +97,11 @@ static void test_full_playback_no_resume(void)
     CHECK(cin2_parse_header(drive, &header), "synthetic header parses");
 
     g_frames_rendered = 0;
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
 
     CHECK(ok, "player_v2_run reports success");
     CHECK(g_frames_rendered == frame_count, "every frame got rendered exactly once");
@@ -118,7 +138,11 @@ static void test_resume_starts_mid_movie(void)
 
     g_frames_rendered = 0;
     /* Start at frame 15 of 20, as if resuming. */
-    ok = player_v2_run(&global, &header, 15);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 15, &map, "");
+    }
 
     CHECK(ok, "resumed playback reports success");
     CHECK(g_frames_rendered == 5, "only the remaining 5 frames were rendered");
@@ -143,7 +167,11 @@ static void test_read_error_is_fatal_and_reported(void)
     /* Fail the read for frame 10's sectors (LBA of frame 10). */
     sim_inject_read_failure_at_lba(cin2_frame_lba(10));
 
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
 
     CHECK(!ok, "player_v2_run reports failure when a frame read errors");
 
@@ -165,7 +193,11 @@ static void test_single_frame_movie(void)
 
     g_frames_rendered = 0;
     g_async_reads = 0;
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
 
     CHECK(ok, "1-frame movie plays to completion");
     CHECK(g_frames_rendered == 1, "exactly 1 frame rendered");
@@ -192,7 +224,11 @@ static void test_exact_four_frame_movie(void)
 
     g_frames_rendered = 0;
     g_async_reads = 0;
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
 
     CHECK(ok, "exact 4-frame movie plays to completion");
     CHECK(g_frames_rendered == 4, "exactly 4 frames rendered");
@@ -238,7 +274,11 @@ static void test_seek_while_paused_resumes_and_jumps_forward(void)
     g_screen_mode_fills = 0;
     g_buffer_mode_fills = 0;
 
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
 
     CHECK(ok, "playback completes normally after a paused seek");
     CHECK(g_screen_mode_fills > 0,
@@ -277,7 +317,11 @@ static void test_empty_movie_rejected(void)
     memset(&global, 0, sizeof(global));
     global.usb = (usb_device_t)(uintptr_t)1;
 
-    ok = player_v2_run(&global, &header, 0);
+    {
+        fat32ro_extent_map_t map = identity_map(1);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
     CHECK(!ok, "zero-frame movie is rejected rather than looping forever");
 }
 

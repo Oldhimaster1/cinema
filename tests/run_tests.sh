@@ -49,15 +49,21 @@ test_decode_and_cin2() {
 test_structural_link() {
     $CC $STUB_CFLAGS \
         src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c src/decode.c \
+        src/fat32ro.c \
         tests/stub_impl.c -o "$TMP/cinema_stub_link"
     "$TMP/cinema_stub_link"
 }
 
 test_player_v2_sim() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
-        src/player_v2.c src/decode.c src/cin2.c src/msd_util.c \
+        src/player_v2.c src/decode.c src/cin2.c src/msd_util.c src/fat32ro.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim.c -o "$TMP/test_player_v2_sim"
     timeout 30 "$TMP/test_player_v2_sim"
+}
+
+test_fat32ro() {
+    $CC $CFLAGS -o "$TMP/test_fat32ro" tests/test_fat32ro.c src/fat32ro.c
+    "$TMP/test_fat32ro"
 }
 
 test_player_v1_sim() {
@@ -76,6 +82,7 @@ test_encoder() {
 }
 
 run_step "decode.c / cin2.c host unit tests"        test_decode_and_cin2
+run_step "fat32ro.c host unit tests"                test_fat32ro
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim
 run_step "player_v1 end-to-end simulation"           test_player_v1_sim
