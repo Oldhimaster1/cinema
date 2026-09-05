@@ -208,8 +208,12 @@ static void test_mount_rejects_bad_bpb_fields(void)
           "invalid sectors_per_cluster is rejected");
 }
 
-static void test_mount_rejects_no_fat32_partition_in_mbr(void)
+static void test_mount_reports_unsupported_for_non_fat32_partition(void)
 {
+    /* An MBR whose only partition is a real (non-FAT32) filesystem --
+     * e.g. NTFS or exFAT -- is a genuinely different situation from a
+     * blank/raw drive: the caller must not then go on to guess this
+     * might be a raw v1/v2 movie image. */
     fat32ro_volume_t vol;
     uint8_t *mbr;
 
@@ -218,8 +222,51 @@ static void test_mount_rejects_no_fat32_partition_in_mbr(void)
     mbr[446 + 4] = 0x07; /* NTFS/exFAT type, not FAT32 */
     put_u16le(mbr + 510, 0x55AA);
 
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM,
+          "an MBR with a real but non-FAT32 partition is reported as unsupported, not NOT_FAT32");
+}
+
+static void test_mount_rejects_empty_mbr_as_not_fat32(void)
+{
+    /* A valid boot signature but a completely empty partition table (all
+     * four entries type 0x00) is what a genuinely blank/unformatted
+     * drive (or a raw whole-device movie image, which also has no
+     * partition table) looks like -- this is the one case that should
+     * still get NOT_FAT32, inviting the caller to try raw detection. */
+    fat32ro_volume_t vol;
+    uint8_t *mbr;
+
+    reset_disk();
+    mbr = g_disk[0];
+    put_u16le(mbr + 510, 0x55AA);
+
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_NOT_FAT32,
-          "an MBR with no FAT32 partition entry is rejected");
+          "an empty partition table is treated as no filesystem at all");
+}
+
+static void test_mount_reports_unsupported_for_fat16_superfloppy(void)
+{
+    /* A directly-formatted (no MBR) FAT16 volume: same jump-instruction
+     * boot sector shape as FAT32, but FATSz32 (offset 36) reads as 0
+     * since FAT16 doesn't have that field, so parse_bpb() correctly
+     * rejects it -- and because it's still boot-sector-shaped, mount()
+     * must report this as a real (if unsupported) filesystem rather
+     * than silently falling through to "no filesystem at all". */
+    fat32ro_volume_t vol;
+    uint8_t *s = g_disk[0];
+
+    reset_disk();
+    s[0] = 0xEB; s[1] = 0x3C; s[2] = 0x90;
+    memcpy(s + 3, "MSDOS5.0", 8);
+    put_u16le(s + 11, 512);
+    s[13] = 4;               /* sectors per cluster */
+    put_u16le(s + 14, 1);    /* reserved sectors */
+    s[16] = 2;                /* num FATs */
+    put_u16le(s + 22, 32);   /* FATSz16 -- the FAT16 field at this offset */
+    put_u16le(s + 510, 0x55AA);
+
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM,
+          "a FAT16 superfloppy boot sector is reported as unsupported, not NOT_FAT32");
 }
 
 static void test_mount_propagates_read_failure(void)
@@ -517,7 +564,9 @@ int main(void)
     test_mount_mbr_partition();
     test_mount_rejects_missing_signature();
     test_mount_rejects_bad_bpb_fields();
-    test_mount_rejects_no_fat32_partition_in_mbr();
+    test_mount_reports_unsupported_for_non_fat32_partition();
+    test_mount_rejects_empty_mbr_as_not_fat32();
+    test_mount_reports_unsupported_for_fat16_superfloppy();
     test_mount_propagates_read_failure();
 
     test_list_root_finds_files_and_skips_others();

@@ -72,7 +72,16 @@ typedef struct {
 typedef enum {
     FAT32RO_SUCCESS = 0,
     FAT32RO_ERROR_READ_FAILED,      /* read_sectors returned short */
-    FAT32RO_ERROR_NOT_FAT32,        /* no FAT32 boot sector found (MBR or superfloppy) */
+    FAT32RO_ERROR_NOT_FAT32,        /* no recognizable filesystem/partition at all -- most
+                                        likely a genuinely raw/unformatted drive (or one holding
+                                        a raw whole-device image), the one case the caller
+                                        should still try interpreting as such */
+    FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM, /* a real, recognizable filesystem/partition IS
+                                        present (a FAT12/16 boot sector, or an MBR partition
+                                        typed NTFS/exFAT/FAT16/etc.) but it isn't FAT32 -- unlike
+                                        FAT32RO_ERROR_NOT_FAT32, the caller should NOT then guess
+                                        this might be a raw v1/v2 image; it's a real filesystem
+                                        this module just doesn't support */
     FAT32RO_ERROR_BAD_BPB,          /* boot sector parsed but BPB fields are nonsensical */
     FAT32RO_ERROR_UNSUPPORTED_SECTOR_SIZE, /* BPB_BytsPerSec != 512 */
     FAT32RO_ERROR_CLUSTER_CHAIN,    /* bad/reserved cluster, or a chain that doesn't terminate

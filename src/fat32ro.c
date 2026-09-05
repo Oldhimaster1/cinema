@@ -62,6 +62,17 @@ static bool is_valid_sectors_per_cluster(uint8_t v)
         || v == 32 || v == 64 || v == 128;
 }
 
+/* FAT12, FAT16, and FAT32 boot sectors all share the same first-3-byte
+ * convention (a short or near jump over the BPB, so real mode code can
+ * execute past it) -- true here means "this sector is shaped like SOME
+ * filesystem's boot sector", not specifically FAT32. Used to tell "a
+ * real (but unsupported) filesystem is here" apart from "there's no
+ * filesystem at all" when parse_bpb() has already failed. */
+static bool looks_like_boot_sector(const uint8_t *sector)
+{
+    return (sector[0] == 0xEB && sector[2] == 0x90) || sector[0] == 0xE9;
+}
+
 /* Parses and sanity-checks the fields this module needs from a FAT32
  * BPB (BIOS Parameter Block). Returns false if any field is out of the
  * range a real FAT32 volume could have -- used both to validate a
@@ -124,23 +135,44 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
     }
 
     if (!parse_bpb(sector, &bpb)) {
-        /* LBA 0 isn't a FAT32 boot sector itself -- try it as an MBR
-         * and look for a FAT32 partition (type 0x0B "FAT32 CHS" or
-         * 0x0C "FAT32 LBA") among its 4 entries. */
         bool found = false;
+        bool any_partition = false;
         int i;
 
+        if (looks_like_boot_sector(sector)) {
+            /* Shaped like a filesystem boot sector (the jump-instruction
+             * convention FAT12/16/32 all share), but didn't pass our
+             * FAT32-specific field checks -- almost certainly a real
+             * FAT12/16 volume (common on small/older USB drives), not a
+             * raw v1/v2 image (those don't have this structure at all).
+             * The caller must not then guess this might be one. */
+            return FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM;
+        }
+
+        /* Not boot-sector-shaped either -- try LBA 0 as an MBR and look
+         * for a FAT32 partition (type 0x0B "FAT32 CHS" or 0x0C "FAT32
+         * LBA") among its 4 entries. */
         for (i = 0; i < 4 && !found; ++i) {
             const uint8_t *entry = sector + 446 + i * 16;
             uint8_t type = entry[4];
 
+            if (type != 0x00) {
+                any_partition = true;
+            }
             if (type == 0x0B || type == 0x0C) {
                 base_lba = read_u32le(entry + 8);
                 found = true;
             }
         }
         if (!found) {
-            return FAT32RO_ERROR_NOT_FAT32;
+            /* A real partition table exists, just with no FAT32 entry
+             * (e.g. NTFS/exFAT/FAT16) -- a recognizable but unsupported
+             * filesystem, not "no filesystem at all". Only an entirely
+             * empty partition table (a genuinely raw/unformatted drive,
+             * or one holding a raw whole-device image) gets the weaker
+             * NOT_FAT32 result that invites the caller to try that. */
+            return any_partition ? FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM
+                                  : FAT32RO_ERROR_NOT_FAT32;
         }
 
         if (read_sectors(ctx, base_lba, 1, sector) != 1) {

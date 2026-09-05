@@ -158,6 +158,15 @@ so no FPS number is claimed here as achieved.
   files and up to 256 cluster-chain extents per movie (i.e. a very
   fragmented file on a nearly-full drive) are supported; anything beyond
   those limits is reported as an error rather than silently truncated.
+- FAT32 only -- FAT16, exFAT, and NTFS drives are detected as "a
+  filesystem Cinema can't read" and rejected with an on-screen message
+  rather than misread as movie data. Small/older USB drives (well under
+  ~1GB) are sometimes formatted FAT16 by default even when the box says
+  "FAT32" -- if you see that message, reformat the drive as FAT32
+  explicitly (on Windows: right-click the drive -> Format -> File
+  system: FAT32; if FAT32 isn't offered for a very small drive, use
+  `format X: /FS:FAT32` from an elevated Command Prompt, or a tool like
+  Rufus).
 
 ## Development / tests
 

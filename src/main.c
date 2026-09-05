@@ -276,23 +276,50 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
 }
 
 /* Attempts to mount a FAT32 filesystem and, if it holds at least one
- * playable file, lets the user browse and pick one. Returns true if a
- * FAT32 filesystem was found at all (regardless of whether a movie was
- * actually played, or even present) -- the caller should NOT then also
- * attempt raw single-image detection in that case, since real
- * filesystem metadata would be misinterpreted as movie data. Returns
- * false only when this isn't a FAT32 drive, in which case *played_ok is
- * unset and the caller should fall back to raw detection. */
+ * playable file, lets the user browse and pick one. Returns true if
+ * ANY recognizable filesystem/partition was found (FAT32 or otherwise),
+ * regardless of whether a movie was actually played -- the caller
+ * should NOT then also attempt raw single-image detection in that case,
+ * since real filesystem metadata would be misinterpreted as movie data
+ * (an unsupported filesystem is reported to the user directly instead).
+ * Returns false only when there's no recognizable filesystem at all
+ * (fat32ro_mount's FAT32RO_ERROR_NOT_FAT32), in which case *played_ok is
+ * unset and the caller should fall back to raw detection -- that's the
+ * one situation still ambiguous enough to plausibly be a raw v1/v2
+ * whole-device image instead of a drive Cinema simply can't read. */
 static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool *played_ok)
 {
     fat32ro_volume_t vol;
     static fat32ro_dirent_t entries[BROWSER_MAX_FILES];
     static fat32ro_dirent_t playable[BROWSER_MAX_FILES];
     static fat32ro_extent_map_t movie_map;
+    fat32ro_error_t mount_err;
     int total_count, playable_count, i, choice;
 
-    if (fat32ro_mount(&vol, fat_read_adapter, global) != FAT32RO_SUCCESS) {
+    mount_err = fat32ro_mount(&vol, fat_read_adapter, global);
+    if (mount_err == FAT32RO_ERROR_NOT_FAT32) {
+        /* Genuinely no recognizable filesystem/partition at all -- the
+         * one case that could plausibly be a raw whole-device v1/v2
+         * image instead, so let the caller try that. */
         return false;
+    }
+    if (mount_err != FAT32RO_SUCCESS) {
+        /* A real filesystem/partition IS present -- just not one this
+         * module supports (FAT16, exFAT, NTFS, ...), or the boot sector
+         * couldn't be read at all. Report that plainly rather than
+         * silently falling through to raw v1/v2 detection, which would
+         * misinterpret filesystem metadata as movie data and fail in a
+         * far more confusing way ("Cinema v1 (legacy) drive detected"
+         * followed by an instant, unexplained exit). */
+        os_ClrHome();
+        if (mount_err == FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM) {
+            putstr("drive has a filesystem Cinema can't read");
+            putstr("(FAT16/exFAT/NTFS?) - reformat it as FAT32");
+        } else {
+            putstr("error reading drive filesystem");
+        }
+        *played_ok = false;
+        return true;
     }
 
     total_count = fat32ro_list_root(&vol, entries, BROWSER_MAX_FILES);
