@@ -24,6 +24,17 @@ void putstr(const char *str)
     os_NewLine();
 }
 
+/* Halts on a status line until the user acknowledges it. Without this,
+ * the connection/format-detection log (usb connected, block size, num
+ * blocks, "Cinema v2 detected", ...) is immediately overwritten by the
+ * next screen (the resume prompt, the file browser, or playback itself
+ * clearing to graphics mode) -- too fast to actually read. */
+static void pause_for_key(void)
+{
+    putstr("press any key to continue");
+    while (!os_GetCSC());
+}
+
 usb_error_t handleUsbEvent(usb_event_t event, void *event_data,
                             usb_callback_data_t *global)
 {
@@ -268,6 +279,7 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
 
     os_ClrHome();
     putstr("Cinema v2 (CIN2) detected");
+    pause_for_key();
     {
         uint32_t start_frame = v2_resume_menu(&header, entry->name);
 
@@ -430,6 +442,8 @@ int main(void)
         goto msd_error;
     }
 
+    pause_for_key();
+
     if (!try_fat32_multi_file(&global, header_sector, &player_ok))
     {
         /* Not a FAT32 drive -- fall back to the original raw
@@ -463,6 +477,7 @@ int main(void)
 
             os_ClrHome();
             putstr("Cinema v2 (CIN2) detected");
+            pause_for_key();
             {
                 uint32_t start_frame = v2_resume_menu(&v2_header, "");
 
@@ -474,6 +489,7 @@ int main(void)
         {
             os_ClrHome();
             putstr("Cinema v1 (legacy) drive detected");
+            pause_for_key();
             {
                 uint32_t start_lba = v1_resume_menu();
                 player_ok = player_v1_run(&global, start_lba);
