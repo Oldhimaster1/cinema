@@ -186,6 +186,38 @@ static void test_mount_mbr_partition(void)
     CHECK(vol.partition_base_lba == partition_lba, "base_lba resolved from the MBR partition entry");
 }
 
+static void test_mount_mbr_partition_with_stale_type_byte(void)
+{
+    /* Regression test for a real bug: a partition reformatted in place
+     * (e.g. Windows' `format D: /FS:FAT32` run against an existing
+     * volume, rather than a full repartition) rewrites the filesystem
+     * inside the partition but doesn't necessarily update the MBR's
+     * type byte to match -- so a real FAT32 partition can end up
+     * sitting behind a stale, non-FAT32 type byte left over from
+     * however the drive was originally partitioned. Mount must still
+     * succeed by checking the partition's actual boot sector content,
+     * not just trusting the declared type byte. */
+    const uint32_t partition_lba = 63;
+    fs_layout_t l = standard_layout(partition_lba);
+    fat32ro_volume_t vol;
+    uint8_t *mbr;
+
+    reset_disk();
+    format_disk(&l);
+
+    mbr = g_disk[0];
+    memset(mbr, 0, 512);
+    mbr[446 + 4] = 0x07; /* stale NTFS/exFAT type byte -- the content is really FAT32 */
+    put_u32le(mbr + 446 + 8, partition_lba);
+    put_u32le(mbr + 446 + 12, l.total_sectors - partition_lba);
+    put_u16le(mbr + 510, 0x55AA);
+
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
+          "a real FAT32 partition mounts even behind a stale/wrong MBR type byte");
+    CHECK(vol.partition_base_lba == partition_lba,
+          "base_lba still resolved correctly despite the wrong type byte");
+}
+
 static void test_mount_rejects_missing_signature(void)
 {
     fat32ro_volume_t vol;
@@ -562,6 +594,7 @@ int main(void)
 {
     test_mount_superfloppy();
     test_mount_mbr_partition();
+    test_mount_mbr_partition_with_stale_type_byte();
     test_mount_rejects_missing_signature();
     test_mount_rejects_bad_bpb_fields();
     test_mount_reports_unsupported_for_non_fat32_partition();

@@ -149,37 +149,47 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
             return FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM;
         }
 
-        /* Not boot-sector-shaped either -- try LBA 0 as an MBR and look
-         * for a FAT32 partition (type 0x0B "FAT32 CHS" or 0x0C "FAT32
-         * LBA") among its 4 entries. */
+        /* Not boot-sector-shaped either -- try LBA 0 as an MBR. For each
+         * non-empty partition entry, read ITS boot sector and check
+         * whether it actually parses as FAT32, rather than trusting the
+         * entry's declared type byte alone: a partition reformatted in
+         * place (e.g. Windows' `format /FS:FAT32` run against an
+         * existing volume) rewrites the filesystem inside the partition
+         * but doesn't necessarily update the MBR's type byte to match,
+         * so a real FAT32 partition can end up sitting behind a stale
+         * type byte (0x07, 0x06, ...) left over from however the drive
+         * was partitioned originally. Type 0x0B/0x0C is still tried
+         * first as a fast path since it's correct on a freshly
+         * partitioned drive, but isn't trusted as the final answer. */
         for (i = 0; i < 4 && !found; ++i) {
             const uint8_t *entry = sector + 446 + i * 16;
             uint8_t type = entry[4];
+            uint32_t candidate_lba;
+            uint8_t candidate[FAT32RO_SECTOR_BYTES];
 
-            if (type != 0x00) {
-                any_partition = true;
+            if (type == 0x00) {
+                continue;
             }
-            if (type == 0x0B || type == 0x0C) {
-                base_lba = read_u32le(entry + 8);
+            any_partition = true;
+
+            candidate_lba = read_u32le(entry + 8);
+            if (read_sectors(ctx, candidate_lba, 1, candidate) == 1
+                && read_u16le(candidate + 510) == 0x55AA
+                && parse_bpb(candidate, &bpb)) {
+                base_lba = candidate_lba;
                 found = true;
             }
         }
         if (!found) {
-            /* A real partition table exists, just with no FAT32 entry
-             * (e.g. NTFS/exFAT/FAT16) -- a recognizable but unsupported
-             * filesystem, not "no filesystem at all". Only an entirely
-             * empty partition table (a genuinely raw/unformatted drive,
-             * or one holding a raw whole-device image) gets the weaker
-             * NOT_FAT32 result that invites the caller to try that. */
+            /* A real partition table exists, just with nothing that
+             * actually parses as FAT32 (e.g. NTFS/exFAT/FAT16) -- a
+             * recognizable but unsupported filesystem, not "no
+             * filesystem at all". Only an entirely empty partition
+             * table (a genuinely raw/unformatted drive, or one holding
+             * a raw whole-device image) gets the weaker NOT_FAT32
+             * result that invites the caller to try that. */
             return any_partition ? FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM
                                   : FAT32RO_ERROR_NOT_FAT32;
-        }
-
-        if (read_sectors(ctx, base_lba, 1, sector) != 1) {
-            return FAT32RO_ERROR_READ_FAILED;
-        }
-        if (read_u16le(sector + 510) != 0x55AA || !parse_bpb(sector, &bpb)) {
-            return FAT32RO_ERROR_BAD_BPB;
         }
     }
 
