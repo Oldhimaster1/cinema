@@ -130,7 +130,7 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
     if (read_sectors(ctx, 0, 1, sector) != 1) {
         return FAT32RO_ERROR_READ_FAILED;
     }
-    if (read_u16le(sector + 510) != 0x55AA) {
+    if (sector[510] != 0x55 || sector[511] != 0xAA) {
         return FAT32RO_ERROR_NOT_FAT32;
     }
 
@@ -174,7 +174,7 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
 
             candidate_lba = read_u32le(entry + 8);
             if (read_sectors(ctx, candidate_lba, 1, candidate) == 1
-                && read_u16le(candidate + 510) == 0x55AA
+                && candidate[510] == 0x55 && candidate[511] == 0xAA
                 && parse_bpb(candidate, &bpb)) {
                 base_lba = candidate_lba;
                 found = true;

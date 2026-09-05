@@ -89,7 +89,7 @@ static void write_boot_sector(const fs_layout_t *l)
     put_u32le(s + 44, l->root_cluster);
     s[66] = 0x29;
     memcpy(s + 82, "FAT32   ", 8);
-    put_u16le(s + 510, 0x55AA);
+    s[510] = 0x55; s[511] = 0xAA;
 }
 
 static void set_fat_entry(const fs_layout_t *l, uint32_t cluster, uint32_t value)
@@ -164,6 +164,61 @@ static void test_mount_superfloppy(void)
     CHECK(vol.first_data_sector == first_data_sector(&l), "first_data_sector computed correctly");
 }
 
+static void test_mount_rejects_swapped_boot_signature(void)
+{
+    /* Regression test for a real bug: the boot signature is a fixed
+     * BYTE SEQUENCE (0x55 at offset 510, then 0xAA at offset 511) per
+     * the FAT spec -- it is not a little-endian-encoded 16-bit value
+     * that happens to be named "0x55AA". Reading those two bytes with a
+     * little-endian load actually yields 0xAA55, so comparing against
+     * the literal 0x55AA constant rejected every real, correctly
+     * formatted FAT32 boot sector (this is exactly what made a genuine
+     * Windows-formatted FAT32 drive get reported as FAT32RO_NOT_FAT32
+     * during real hardware testing). This test pins the correct byte
+     * order and guards against reintroducing the swap. */
+    fs_layout_t l = standard_layout(0);
+    fat32ro_volume_t vol;
+    uint8_t *s = g_disk[0];
+
+    reset_disk();
+    format_disk(&l);
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
+          "sanity check: the correctly-ordered signature mounts");
+
+    reset_disk();
+    format_disk(&l);
+    s[510] = 0xAA; s[511] = 0x55; /* the two signature bytes, swapped */
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) != FAT32RO_SUCCESS,
+          "a swapped boot signature (0xAA,0x55) is rejected, not accepted");
+}
+
+static void test_mount_realistic_small_fat32_drive(void)
+{
+    /* Mirrors the real drive that exposed the signature-endianness bug:
+     * a small (~245MB) USB drive, Windows `format /FS:FAT32` defaults --
+     * 4 sectors/cluster (2048-byte clusters), 2 FATs, 32 reserved
+     * sectors, superfloppy layout (no MBR). Exists so a future change
+     * that happens to satisfy the narrower synthetic-test layouts above
+     * but not a realistic one still gets caught. */
+    fat32ro_volume_t vol;
+    fs_layout_t l;
+
+    l.base_lba = 0;
+    l.reserved_sectors = 32;
+    l.sectors_per_cluster = 4;
+    l.num_fats = 2;
+    l.fat_size_sectors = 500;
+    l.root_cluster = 2;
+    l.total_sectors = 501555; /* ~245MB at 512 bytes/sector */
+
+    reset_disk();
+    format_disk(&l);
+
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
+          "a realistic small Windows-formatted FAT32 drive mounts");
+    CHECK(vol.sectors_per_cluster == 4, "sectors_per_cluster matches a 2048-byte cluster");
+}
+
 static void test_mount_mbr_partition(void)
 {
     const uint32_t partition_lba = 63; /* a plausible, non-zero partition start */
@@ -180,7 +235,7 @@ static void test_mount_mbr_partition(void)
     mbr[446 + 4] = 0x0C;
     put_u32le(mbr + 446 + 8, partition_lba);
     put_u32le(mbr + 446 + 12, l.total_sectors - partition_lba);
-    put_u16le(mbr + 510, 0x55AA);
+    mbr[510] = 0x55; mbr[511] = 0xAA;
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS, "MBR-partitioned volume mounts");
     CHECK(vol.partition_base_lba == partition_lba, "base_lba resolved from the MBR partition entry");
@@ -210,7 +265,7 @@ static void test_mount_mbr_partition_with_stale_type_byte(void)
     mbr[446 + 4] = 0x07; /* stale NTFS/exFAT type byte -- the content is really FAT32 */
     put_u32le(mbr + 446 + 8, partition_lba);
     put_u32le(mbr + 446 + 12, l.total_sectors - partition_lba);
-    put_u16le(mbr + 510, 0x55AA);
+    mbr[510] = 0x55; mbr[511] = 0xAA;
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
           "a real FAT32 partition mounts even behind a stale/wrong MBR type byte");
@@ -252,7 +307,7 @@ static void test_mount_reports_unsupported_for_non_fat32_partition(void)
     reset_disk();
     mbr = g_disk[0];
     mbr[446 + 4] = 0x07; /* NTFS/exFAT type, not FAT32 */
-    put_u16le(mbr + 510, 0x55AA);
+    mbr[510] = 0x55; mbr[511] = 0xAA;
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM,
           "an MBR with a real but non-FAT32 partition is reported as unsupported, not NOT_FAT32");
@@ -270,7 +325,7 @@ static void test_mount_rejects_empty_mbr_as_not_fat32(void)
 
     reset_disk();
     mbr = g_disk[0];
-    put_u16le(mbr + 510, 0x55AA);
+    mbr[510] = 0x55; mbr[511] = 0xAA;
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_NOT_FAT32,
           "an empty partition table is treated as no filesystem at all");
@@ -295,7 +350,7 @@ static void test_mount_reports_unsupported_for_fat16_superfloppy(void)
     put_u16le(s + 14, 1);    /* reserved sectors */
     s[16] = 2;                /* num FATs */
     put_u16le(s + 22, 32);   /* FATSz16 -- the FAT16 field at this offset */
-    put_u16le(s + 510, 0x55AA);
+    s[510] = 0x55; s[511] = 0xAA;
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_ERROR_UNSUPPORTED_FILESYSTEM,
           "a FAT16 superfloppy boot sector is reported as unsupported, not NOT_FAT32");
@@ -593,6 +648,8 @@ static void test_extent_lookup_across_boundaries(void)
 int main(void)
 {
     test_mount_superfloppy();
+    test_mount_rejects_swapped_boot_signature();
+    test_mount_realistic_small_fat32_drive();
     test_mount_mbr_partition();
     test_mount_mbr_partition_with_stale_type_byte();
     test_mount_rejects_missing_signature();
