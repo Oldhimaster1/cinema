@@ -489,6 +489,21 @@ int main(void)
         {
             os_ClrHome();
             putstr("Cinema v1 (legacy) drive detected");
+            /* Diagnostic dump for whenever this fallback is reached
+             * unexpectedly (e.g. a drive that should have mounted as
+             * FAT32 didn't) -- first 3 bytes catch a boot-sector jump
+             * instruction fat32ro_mount didn't recognize, the boot
+             * signature confirms whether LBA 0 even looks like a boot
+             * sector/MBR at all, and the 4 partition type bytes show
+             * what fat32ro_mount's MBR scan actually saw. */
+            sprintf(buffer, "b0-2=%02X%02X%02X sig=%02X%02X",
+                    header_sector[0], header_sector[1], header_sector[2],
+                    header_sector[510], header_sector[511]);
+            putstr(buffer);
+            sprintf(buffer, "types=%02X,%02X,%02X,%02X",
+                    header_sector[446 + 4], header_sector[462 + 4],
+                    header_sector[478 + 4], header_sector[494 + 4]);
+            putstr(buffer);
             pause_for_key();
             {
                 uint32_t start_lba = v1_resume_menu();
