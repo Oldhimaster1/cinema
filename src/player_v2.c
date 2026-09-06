@@ -119,6 +119,21 @@ typedef struct {
     uint32_t fps_tenths;      /* measured presentation rate x10 */
 } player_v2_t;
 
+/* TEMPORARY: pauses for ~2 real seconds on hardware so a diagnostic
+ * putstr() actually gets seen before the next step runs, without
+ * relying on os_GetCSC() (which the host simulation tests never
+ * schedule a key for at these new call sites, and would otherwise hang
+ * forever). Remove alongside the checkpoints that use it once the crash
+ * under investigation is fixed. */
+static void checkpoint_pause(void)
+{
+    clock_t start = clock();
+
+    while ((clock_t)(clock() - start) < (clock_t)(2 * CLOCKS_PER_SEC)) {
+        usb_HandleEvents();
+    }
+}
+
 /* Callback only records what happened -- no graphics calls, no printing,
  * no LBA math, and (per the comment on pending_parts above) no queueing
  * of the next part either. The main loop decides what any of it means. */
@@ -230,7 +245,15 @@ static msd_error_t queue_frame(global_t *global, const fat32ro_extent_map_t *map
  * itself failed to queue, or a frame couldn't be resolved to sectors at
  * all (not if a previously-queued transfer later errors out -- that's
  * caught via find_failed_slot in the main loop). */
-static bool refill_empty_slots(player_v2_t *player)
+/* verbose_diag is TEMPORARY (see player_v2_run): only prefill_frames()
+ * passes true. refill_empty_slots also runs on every single iteration
+ * of the main playback loop, so printing/pausing there too would stall
+ * every frame of actual playback by ~2 seconds each -- and, under the
+ * host simulation's clock, compounds into a runaway feedback loop
+ * (each pause's own usb_HandleEvents() calls advance the simulated
+ * clock, which pushes the "wanted" frame further ahead, requiring more
+ * frames queued, each adding another pause -- never converging). */
+static bool refill_empty_slots(player_v2_t *player, bool verbose_diag)
 {
     uint8_t i;
 
@@ -238,8 +261,20 @@ static bool refill_empty_slots(player_v2_t *player)
         frame_slot_t *slot = &player->slots[i];
 
         if (slot->state == SLOT_NEEDS_NEXT_PART) {
+            if (verbose_diag) {
+                char dbg[32];
+                sprintf(dbg, "q slot=%u part=%u", i, (unsigned)slot->next_pending_part);
+                putstr(dbg);
+                checkpoint_pause();
+            }
+
             if (queue_slot_part(player->global, slot) != MSD_SUCCESS) {
                 return false;
+            }
+
+            if (verbose_diag) {
+                putstr("q part ok");
+                checkpoint_pause();
             }
             continue;
         }
@@ -251,10 +286,24 @@ static bool refill_empty_slots(player_v2_t *player)
             continue;
         }
 
+        if (verbose_diag) {
+            char dbg[32];
+            sprintf(dbg, "q slot=%u frame=%lu", i,
+                    (unsigned long)player->next_frame_to_queue);
+            putstr(dbg);
+            checkpoint_pause();
+        }
+
         if (queue_frame(player->global, player->movie_map, slot,
                          player->next_frame_to_queue) != MSD_SUCCESS) {
             return false;
         }
+
+        if (verbose_diag) {
+            putstr("q frame ok");
+            checkpoint_pause();
+        }
+
         player->next_frame_to_queue++;
     }
 
@@ -294,7 +343,7 @@ static bool all_queued_slots_resolved(player_v2_t *player)
  * frame the original player waited for. */
 static bool prefill_frames(player_v2_t *player)
 {
-    if (!refill_empty_slots(player)) {
+    if (!refill_empty_slots(player, true)) {
         putstr("error queueing msd (prefill)");
         return false;
     }
@@ -316,7 +365,7 @@ static bool prefill_frames(player_v2_t *player)
         /* A slot that just finished one part of a multi-part
          * (fragmented-file) frame is sitting in SLOT_NEEDS_NEXT_PART --
          * without this, it would never progress during prefill. */
-        if (!refill_empty_slots(player)) {
+        if (!refill_empty_slots(player, true)) {
             putstr("error queueing msd (prefill)");
             return false;
         }
@@ -734,7 +783,7 @@ static bool player_v2_loop(player_v2_t *player)
             }
         }
 
-        if (!refill_empty_slots(player)) {
+        if (!refill_empty_slots(player, false)) {
             putstr("error queueing msd (frame)");
             return false;
         }
@@ -837,21 +886,6 @@ static bool player_v2_loop(player_v2_t *player)
                 player->repeated_frames++;
             }
         }
-    }
-}
-
-/* TEMPORARY: pauses for ~2 real seconds on hardware so a diagnostic
- * putstr() actually gets seen before the next step runs, without
- * relying on os_GetCSC() (which the host simulation tests never
- * schedule a key for at these new call sites, and would otherwise hang
- * forever). Remove alongside the checkpoints in player_v2_run once the
- * crash under investigation is fixed. */
-static void checkpoint_pause(void)
-{
-    clock_t start = clock();
-
-    while ((clock_t)(clock() - start) < (clock_t)(2 * CLOCKS_PER_SEC)) {
-        usb_HandleEvents();
     }
 }
 
