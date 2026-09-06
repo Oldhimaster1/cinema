@@ -127,6 +127,7 @@ typedef struct {
     /* --- OSD / controls --- */
     bool osd_pinned;          /* toggled on with [mode], stays until toggled off */
     clock_t osd_until_tick;   /* transient show-after-keypress deadline */
+    bool osd_was_visible;     /* was the OSD drawn on the previous frame? */
     uint8_t osd_clear_pending; /* frames left to scrub the OSD out of both buffers */
     uint8_t osd_fg;           /* brightest palette index, chosen at startup */
     uint8_t osd_bg;           /* darkest palette index */
@@ -709,13 +710,31 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
     player->decode_ticks_total += (uint32_t)(clock() - decode_start);
     player->decode_samples++;
 
-    if (osd_should_draw(player)) {
-        draw_osd(player);
-    } else if (player->osd_clear_pending > 0) {
-        /* Scrub the OSD out of the margin. Runs twice so both swap
-         * buffers get cleaned, not just the one in hand. */
-        osd_fill_rect(0, V2_OSD_TOP, GFX_LCD_WIDTH, V2_OSD_ROWS, player->osd_bg);
-        player->osd_clear_pending--;
+    {
+        bool showing = osd_should_draw(player);
+
+        if (showing) {
+            draw_osd(player);
+        } else {
+            if (player->osd_was_visible) {
+                /* Just transitioned from showing to hidden -- either the
+                 * keypress linger timer expired naturally, or Mode just
+                 * unpinned it (which also forces osd_should_draw() false
+                 * immediately, so this one path handles both). Without
+                 * this, the OSD's last-drawn content (e.g. a stale
+                 * timecode) would just sit there forever: nothing else
+                 * ever repaints the letterbox margin once draw_osd()
+                 * stops being called. */
+                player->osd_clear_pending = 2;
+            }
+            if (player->osd_clear_pending > 0) {
+                /* Scrub the OSD out of the margin. Runs twice so both
+                 * swap buffers get cleaned, not just the one in hand. */
+                osd_fill_rect(0, V2_OSD_TOP, GFX_LCD_WIDTH, V2_OSD_ROWS, player->osd_bg);
+                player->osd_clear_pending--;
+            }
+        }
+        player->osd_was_visible = showing;
     }
 
     /* No gfx_Wait() here, deliberately: graphx.h's own documentation
@@ -889,9 +908,10 @@ static bool player_v2_loop(player_v2_t *player)
             case sk_Mode:
                 player->osd_pinned = !player->osd_pinned;
                 if (!player->osd_pinned) {
-                    /* Clear it out of both swap buffers, and don't let
-                     * the keypress-linger immediately redraw it. */
-                    player->osd_clear_pending = 2;
+                    /* Don't let the keypress-linger immediately redraw
+                     * it -- render_frame()'s own showing/was_visible
+                     * transition check clears it out of both swap
+                     * buffers, the same as a natural linger expiry. */
                     player->osd_until_tick = clock();
                 }
                 break;
