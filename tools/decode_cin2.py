@@ -63,8 +63,10 @@ def indices_to_rgb_image(indices: list[int], header: fmt.Cin2Header) -> Image.Im
 
 
 def scale_2x_nearest(img: Image.Image) -> Image.Image:
-    """Matches src/decode.c's cinema_draw_packed4_scaled2x exactly:
-    plain nearest-neighbor 2x, no interpolation."""
+    """Matches what the calculator actually displays: src/decode.c
+    unpacks at native resolution (no scaling), then player_v2.c draws it
+    with GraphX's gfx_ScaledSprite_NoClip(..., 2, 2) -- plain
+    nearest-neighbor 2x, no interpolation, same as this."""
     return img.resize((img.width * 2, img.height * 2), Image.Resampling.NEAREST)
 
 

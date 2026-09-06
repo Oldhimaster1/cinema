@@ -112,41 +112,50 @@ kept only for backward compatibility with existing v1 drives).
 
 ## Performance
 
-Two build/runtime changes target playback speed directly, both reasoned
-from the eZ80 core's known instruction-set limitations (no barrel
-shifter, no native 32-bit multiply) rather than measured on hardware:
+`src/decode.c` only unpacks packed 4-bit pixels into a plain 8bpp
+buffer at native (160x96) resolution -- it does no scaling at all.
+`src/player_v2.c` then draws that buffer 2x scaled via GraphX's own
+`gfx_ScaledSprite_NoClip()`, the same primitive `src/player_v1.c` (the
+legacy player) already uses at the same scale factor. An earlier
+version of `decode.c` did the unpacking *and* the 2x scaling itself, in
+a hand-written C loop; real-hardware testing showed that loop
+significantly slower than what v1 gets from GraphX's own scaler for
+the same job, so the scaling half of the work moved to the library
+instead of being redone by hand. The unpack step still uses a
+precomputed lookup table (nibble-shift arithmetic is expensive on the
+eZ80 core, which has no barrel shifter), verified byte-identical
+against an independent reference (`tests/test_decode_cross_check.py`),
+not just "still passes".
 
-- The build now compiles at `-O3` (the CE Toolchain default is `-Oz`,
-  optimize for *size*). Free performance for a few extra KB of flash.
-- `src/decode.c`'s packed-4-bit-to-2x-scaled blit -- the routine that
-  runs on every displayed frame -- replaced nibble-shift arithmetic
-  with a precomputed lookup table, replaced recomputing the bottom of
-  each 2x-scaled row with copying the top row it duplicates, and
-  replaced a per-row multiply with a running pointer. Verified
-  byte-identical output against an independent reference
-  (`tests/test_decode_cross_check.py`), not just "still passes".
+The build compiles at `-O3` (the CE Toolchain default is `-Oz`,
+optimize for *size*) -- free performance for a few extra KB of flash.
+
+Cinema deliberately does **not** boost the CPU to 48MHz at startup,
+even though that sounds like an obvious win: `usbdrvce.h` documents
+`USB_TRANSFER_BUS_ERROR` as most likely caused by running at a
+non-default CPU speed, and real hardware confirmed it -- decode got
+*slower*, not faster, at 48MHz, consistent with USB bus-error overhead
+eating the gain. Cinema reads from USB continuously during playback,
+so there's no window where boosting is safe.
 
 Exit (or the live overlay, or Mode to pin it open) reports the
 player's own measured average decode time per frame and the FPS that
 implies as a ceiling *for the decoder alone* -- e.g. "decode avg: 12.500
-ms (decode ceiling: ~80 fps)" means the blit itself isn't what's
-capping playback if the observed FPS is much lower than that ceiling;
-something else (USB read throughput, `gfx_Wait()`/LCD timing) is. That
-split is what makes further optimization work targeted instead of
-guesswork -- but it has not yet been measured on physical hardware,
-so no FPS number is claimed here as achieved.
+ms (decode ceiling: ~80 fps)" means decode isn't what's capping
+playback if the observed FPS is much lower than that ceiling; something
+else (USB read throughput, `gfx_Wait()`/LCD timing) is. That split is
+what makes further optimization work targeted instead of guesswork.
 
 ## Known limitations
 
 - v2 has been validated with host-side unit/simulation tests (see
-  `tests/`) and structural compilation against the real CE-Programming
-  toolchain headers, but **not yet on physical TI-84 Plus CE hardware**
-  -- there is no ez80 CE toolchain or calculator available in this
-  development environment. Build with the real toolchain and soak-test
-  before relying on it for anything long-form. See
-  `docs/CIN2_FORMAT.md` for the full design rationale and open risks
-  (sustained USB throughput, decode+scale CPU budget, hardware read
-  latency spikes).
+  `tests/`), structural compilation against the real CE-Programming
+  toolchain headers, and real physical TI-84 Plus CE hardware testing
+  (there is no ez80 CE toolchain or calculator in the development
+  environment itself, so hardware testing happens on the user's own
+  device). Playback speed on real hardware is an active area of work --
+  see "Performance" above for what's been tried and why. See
+  `docs/CIN2_FORMAT.md` for the full design rationale.
 - The v2 encoder targets 160x96 only, matching the calculator-side
   decoder; both would need to change together to support another
   resolution.

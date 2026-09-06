@@ -1,10 +1,12 @@
 /* Stub of the real CE-toolchain graphx.h -- see ce_types.h header
  * comment. gfx_vbuffer's shape (a real 2D array lvalue, not a flat
  * pointer) and all signatures below are transcribed from
- * https://github.com/CE-Programming/toolchain src/graphx/graphx.h;
- * getting gfx_vbuffer's exact shape right here matters because
- * src/player_v2.c and src/decode.c code against it directly instead of
- * going through gfx_Sprite/GraphX's scaler. */
+ * https://github.com/CE-Programming/toolchain src/graphx/graphx.h.
+ * gfx_vbuffer itself is still used directly by player_v1.c's legacy
+ * palette/sprite path; src/player_v2.c and src/decode.c go through
+ * gfx_ScaledSprite_NoClip() instead (GraphX's own scaler), not
+ * gfx_vbuffer, so getting that shape exactly right matters less for v2
+ * than it used to. */
 #ifndef CINEMA_TEST_GRAPHX_H
 #define CINEMA_TEST_GRAPHX_H
 

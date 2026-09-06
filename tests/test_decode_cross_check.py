@@ -2,7 +2,12 @@
 with the host gcc into a shared library and called via ctypes -- the
 actual C code that ships, not a reimplementation of it) against an
 independent pure-Python reference model, on randomized frames. Requires
-byte-identical output between the two."""
+byte-identical output between the two.
+
+decode.c only unpacks packed 4-bit pixels into a flat native-resolution
+(no scaling) buffer -- see src/decode.h for why 2x scaling moved to
+GraphX's own gfx_ScaledSprite_NoClip() instead of being done by hand
+here."""
 import ctypes
 import random
 import subprocess
@@ -27,41 +32,36 @@ def decode_lib(tmp_path_factory):
         check=True,
     )
     lib = ctypes.CDLL(str(so_path))
-    lib.cinema_draw_packed4_scaled2x.argtypes = [
+    lib.cinema_unpack_packed4.argtypes = [
         ctypes.POINTER(ctypes.c_uint8), ctypes.POINTER(ctypes.c_uint8),
-        ctypes.c_uint16, ctypes.c_uint16,
     ]
-    lib.cinema_draw_packed4_scaled2x.restype = None
+    lib.cinema_unpack_packed4.restype = None
     return lib
 
 
-def c_decode(lib, packed: bytes, stride: int, y_offset: int, fb_height: int) -> bytearray:
-    fb = (ctypes.c_uint8 * (fb_height * stride))(*([0xAA] * (fb_height * stride)))
+def c_decode(lib, packed: bytes) -> bytearray:
+    # One guard byte past the real buffer so an overrun shows up as a
+    # mismatch instead of silently corrupting unrelated memory.
+    size = fmt.WIDTH * fmt.HEIGHT
+    out = (ctypes.c_uint8 * (size + 1))(*([0xAA] * (size + 1)))
     packed_buf = (ctypes.c_uint8 * len(packed))(*packed)
-    lib.cinema_draw_packed4_scaled2x(packed_buf, fb, ctypes.c_uint16(stride),
-                                      ctypes.c_uint16(y_offset))
-    return bytearray(fb)
+    lib.cinema_unpack_packed4(packed_buf, out)
+    return bytearray(out)
 
 
-def python_reference_decode(packed: bytes, stride: int, y_offset: int, fb_height: int) -> bytearray:
+def python_reference_decode(packed: bytes) -> bytearray:
     """Independent reference model: not calling into decode.c, not
     calling into cin2_format's pack/unpack -- just the spec's own
-    nibble-order and 2x-nearest-neighbor rule, implemented separately."""
-    fb = bytearray([0xAA] * (fb_height * stride))
-    indices = []
+    nibble-order rule (high nibble = even/first pixel), implemented
+    separately. One extra guard byte to match c_decode's shape."""
+    out = bytearray(fmt.WIDTH * fmt.HEIGHT + 1)
+    out[-1] = 0xAA
+    i = 0
     for byte in packed:
-        indices.append(byte >> 4)
-        indices.append(byte & 0x0F)
-
-    for y in range(fmt.HEIGHT):
-        for x in range(fmt.WIDTH):
-            value = indices[y * fmt.WIDTH + x]
-            for dy in (0, 1):
-                for dx in (0, 1):
-                    row = y_offset + y * 2 + dy
-                    col = x * 2 + dx
-                    fb[row * stride + col] = value
-    return fb
+        out[i] = byte >> 4
+        out[i + 1] = byte & 0x0F
+        i += 2
+    return out
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -70,64 +70,41 @@ def test_random_frames_byte_identical(decode_lib, seed):
     indices = [rng.randrange(16) for _ in range(fmt.WIDTH * fmt.HEIGHT)]
     packed = fmt.pack_frame(indices)
 
-    stride = 320
-    y_offset = 24
-    fb_height = 240
-
-    c_result = c_decode(decode_lib, packed, stride, y_offset, fb_height)
-    py_result = python_reference_decode(packed, stride, y_offset, fb_height)
+    c_result = c_decode(decode_lib, packed)
+    py_result = python_reference_decode(packed)
 
     assert c_result == py_result, f"mismatch for seed={seed}"
 
 
-def test_guard_regions_untouched(decode_lib):
-    """Bytes outside [y_offset, y_offset + 192) rows must never be
-    written -- confirms the blit doesn't overrun its destination
-    region."""
+def test_guard_byte_untouched(decode_lib):
+    """The one byte past the real output buffer must never be written --
+    confirms the unpack doesn't overrun its destination."""
     indices = [15] * (fmt.WIDTH * fmt.HEIGHT)  # maximal write pattern
     packed = fmt.pack_frame(indices)
-    stride = 320
-    y_offset = 24
-    fb_height = 240
 
-    fb = c_decode(decode_lib, packed, stride, y_offset, fb_height)
+    out = c_decode(decode_lib, packed)
 
-    before = fb[: y_offset * stride]
-    after = fb[(y_offset + fmt.HEIGHT * 2) * stride:]
-    assert all(b == 0xAA for b in before), "wrote above the intended y_offset"
-    assert all(b == 0xAA for b in after), "wrote below the intended frame area"
+    assert out[-1] == 0xAA, "wrote past the intended output size"
 
 
 def test_reversed_nibble_order_is_high_then_low(decode_lib):
-    """First byte 0x3C must decode to left=3, right=12 -- high nibble is
-    the even (left) pixel, per docs/CIN2_FORMAT.md. This test would
+    """First byte 0x3C must decode to out[0]=3, out[1]=12 -- high nibble
+    is the even (first) pixel, per docs/CIN2_FORMAT.md. This test would
     catch a nibble-order swap."""
     indices = [3, 12] + [0] * (fmt.WIDTH * fmt.HEIGHT - 2)
     packed = fmt.pack_frame(indices)
-    stride = 320
-    y_offset = 0
 
-    fb = c_decode(decode_lib, packed, stride, y_offset, 96 * 2)
+    out = c_decode(decode_lib, packed)
 
-    assert fb[0] == 3
-    assert fb[1] == 3
-    assert fb[2] == 12
-    assert fb[3] == 12
+    assert out[0] == 3
+    assert out[1] == 12
 
 
 def test_last_pixel_edge_case(decode_lib):
     indices = [0] * (fmt.WIDTH * fmt.HEIGHT)
     indices[-1] = 9
     packed = fmt.pack_frame(indices)
-    stride = 320
-    y_offset = 0
-    fb_height = fmt.HEIGHT * 2
 
-    fb = c_decode(decode_lib, packed, stride, y_offset, fb_height)
+    out = c_decode(decode_lib, packed)
 
-    last_row0 = (fb_height - 2) * stride
-    last_row1 = (fb_height - 1) * stride
-    assert fb[last_row0 + stride - 1] == 9
-    assert fb[last_row0 + stride - 2] == 9
-    assert fb[last_row1 + stride - 1] == 9
-    assert fb[last_row1 + stride - 2] == 9
+    assert out[fmt.WIDTH * fmt.HEIGHT - 1] == 9

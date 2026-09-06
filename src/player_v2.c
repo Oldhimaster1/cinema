@@ -80,6 +80,13 @@ typedef struct {
     uint8_t next_pending_part;
 } frame_slot_t;
 
+/* Native-resolution (unscaled) sprite each frame is unpacked into --
+ * see decode.h for why decode.c itself no longer scales. width/height
+ * are set once, in player_v2_run(); gfx_UninitedSprite() only reserves
+ * the memory, it doesn't fill in the sprite header. */
+static uint8_t movie_sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
+static gfx_sprite_t *const movie_sprite = (gfx_sprite_t *)movie_sprite_data;
+
 typedef struct {
     global_t *global;
     const fat32ro_extent_map_t *movie_map;
@@ -673,9 +680,16 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
     /* No gfx_SetDrawBuffer() here: per GraphX's own documentation,
      * "makes graphics routines act on the non-visible buffer" is a
      * persistent mode, not reset by gfx_SwapDraw() -- it only needs to
-     * be set once, which player_v2_run() already does during setup. */
-    cinema_draw_packed4_scaled2x(slot->packed, &gfx_vbuffer[0][0],
-                                  GFX_LCD_WIDTH, V2_Y_OFFSET);
+     * be set once, which player_v2_run() already does during setup.
+     *
+     * Unpacking is now just the 4-bit-to-8bpp expansion (no scaling --
+     * see decode.h); the actual 2x scale-up is GraphX's own
+     * gfx_ScaledSprite_NoClip(), the same primitive Cinema's v1 (legacy)
+     * player already uses successfully at this exact scale factor. A
+     * hand-written unpack+scale loop here previously measured far
+     * slower on real hardware than v1's library-driven scaling does. */
+    cinema_unpack_packed4(slot->packed, movie_sprite->data);
+    gfx_ScaledSprite_NoClip(movie_sprite, 0, V2_Y_OFFSET, 2, 2);
 
     /* Measured around the blit only -- not the OSD, not the swap wait --
      * so the reported number is the decoder's own cost. */
@@ -948,6 +962,9 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     ok = prefill_frames(&player);
 
     if (ok) {
+        movie_sprite->width = CINEMA_V2_WIDTH;
+        movie_sprite->height = CINEMA_V2_HEIGHT;
+
         gfx_Begin();
         graphics_active = true;
         gfx_SetPalette(header->palette, sizeof(header->palette), 0);
