@@ -2,7 +2,7 @@
 src/cin2.c. See docs/CIN2_FORMAT.md for the authoritative binary layout;
 if you change either this file or src/cin2.c, update the other and the
 spec in the same commit. tests/test_cin2_format.py checks this module
-against known-answer test vectors shared with tests/test_decode.c.
+against known-answer test vectors shared with tests/test_cin2.c.
 """
 from __future__ import annotations
 
@@ -16,16 +16,21 @@ VERSION = 2
 HEADER_BYTES = 512
 CRC_BYTES = 22  # bytes [0, 22) covered by header_crc32
 DATA_LBA = 1
-FRAME_SECTORS = 15
+FRAME_SECTORS = 30
 SECTOR_BYTES = 512
 PALETTE_ENTRIES = 16
 
-# The only geometry the calculator-side decoder (src/decode.c) knows how
-# to draw. An encoder targeting a different resolution would need a
+# The only geometry the calculator-side player (src/player_v2.c) knows
+# how to draw. An encoder targeting a different resolution would need a
 # corresponding change on the calculator, not just here.
 WIDTH = 160
 HEIGHT = 96
-PACKED_BYTES = (WIDTH * HEIGHT) // 2
+# One byte per pixel (0..15, indexing the shared palette), not bit-packed
+# -- see docs/CIN2_FORMAT.md's "Why a new format" section for why v2
+# dropped 4-bit packing after real-hardware testing showed the CPU cost
+# of unpacking it back out cost more than the packing saved.
+FRAME_BYTES = WIDTH * HEIGHT
+assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
 
 RESUME_MAGIC = b"CR2S"
 RESUME_BYTES = 33
@@ -109,31 +114,22 @@ def parse_header(raw: bytes) -> Cin2Header:
     )
 
 
-def pack_frame(indices: Sequence[int]) -> bytes:
+def encode_frame(indices: Sequence[int]) -> bytes:
     """indices: WIDTH*HEIGHT palette indices (0..15), row-major,
-    top-to-bottom, left-to-right. Returns PACKED_BYTES bytes."""
+    top-to-bottom, left-to-right. Returns FRAME_BYTES bytes: one byte per
+    pixel, unpacked -- this is exactly what lands in the calculator's
+    sprite buffer straight off the USB read, with no decode step."""
     if len(indices) != WIDTH * HEIGHT:
         raise ValueError(f"expected {WIDTH * HEIGHT} indices, got {len(indices)}")
-
-    out = bytearray(PACKED_BYTES)
-    for i in range(0, len(indices), 2):
-        left = indices[i]
-        right = indices[i + 1]
-        if not (0 <= left <= 15 and 0 <= right <= 15):
-            raise ValueError("palette indices must be 4-bit (0..15)")
-        out[i // 2] = (left << 4) | right
-    return bytes(out)
+    if any(not (0 <= i <= 15) for i in indices):
+        raise ValueError("palette indices must be 0..15 (only 16 palette entries exist)")
+    return bytes(indices)
 
 
-def unpack_frame(packed: bytes) -> list[int]:
-    if len(packed) != PACKED_BYTES:
-        raise ValueError(f"expected {PACKED_BYTES} bytes, got {len(packed)}")
-
-    out: list[int] = []
-    for b in packed:
-        out.append(b >> 4)
-        out.append(b & 0x0F)
-    return out
+def decode_frame(raw: bytes) -> list[int]:
+    if len(raw) != FRAME_BYTES:
+        raise ValueError(f"expected {FRAME_BYTES} bytes, got {len(raw)}")
+    return list(raw)
 
 
 @dataclass

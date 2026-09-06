@@ -10,14 +10,14 @@ Cinema is a video player application that allows you to watch videos on your TI-
 
 Cinema now supports two on-disk formats, auto-detected from the drive:
 
-- **v2 (CIN2, recommended):** packed 4-bit indexed color, one shared
-  16-color palette, 24fps-capable (any rational frame rate, e.g. 24/1 or
-  24000/1001). See [`docs/CIN2_FORMAT.md`](docs/CIN2_FORMAT.md) for why
-  this exists and the exact on-disk layout.
+- **v2 (CIN2, recommended):** 16-color indexed color with one shared
+  palette for the whole movie, any rational frame rate (e.g. 24/1 or
+  24000/1001, 15fps by default). See [`docs/CIN2_FORMAT.md`](docs/CIN2_FORMAT.md)
+  for why this exists and the exact on-disk layout.
 - **v1 (legacy):** the original 256-color-per-frame format, still fully
   supported for existing drives.
 
-## Installation Instructions (v2 / 24fps)
+## Installation Instructions (v2)
 
 Cinema reads movie files directly off a normally-formatted FAT32 USB
 drive, so **multiple movies can live on one drive** as separate files --
@@ -29,17 +29,21 @@ no need to dedicate a whole drive to a single video.
 2. **Encode your video(s):**
    ```
    pip install pillow
-   python3 tools/encode_cin2.py input.mp4 output.bin --fps 24
+   python3 tools/encode_cin2.py input.mp4 output.bin
    ```
    Requires `ffmpeg` on your PATH. `tools/encode_cin2.py` is a single
    self-contained script -- no sibling files needed, copy just that one
    file anywhere. It decodes the source once via a raw pipe (no PNG
    round-trip) and quantizes frames in parallel across all CPU cores by
    default (`--jobs N` to control that, `--jobs 1` for single-threaded).
-   Use `--fps 24000/1001` for film-rate content, `--start`/`--duration`
-   to trim, and `--palette-samples` to control how many frames are
-   sampled when building the movie's global 16-color palette (see
-   `--help`).
+   Defaults to 15fps, chosen to fit the CE Toolchain's documented
+   ~262-273 KiB/s tested USB throughput with headroom at this format's
+   15,360 bytes/frame (see "Performance" below) -- raise it with `--fps`
+   (e.g. `--fps 24` or `--fps 24000/1001` for film-rate content) if your
+   drive is faster than that, at the risk of dropped frames if it isn't.
+   `--start`/`--duration` trims, and `--palette-samples` controls how
+   many frames are sampled when building the movie's global 16-color
+   palette (see `--help`).
 3. **Copy the output file(s) onto the drive**, in the root folder, with
    a `.bin` or `.cin` extension (either works -- the extension is only
    used to tell movie files apart from anything else on the drive, e.g.
@@ -106,26 +110,53 @@ kept only for backward compatibility with existing v1 drives).
 |------------------|------------------------------------|-----------------------|
 | Resolution       | 160 x 96                          | 160 x 96               |
 | Color depth      | 16 colors (one shared palette)    | 256 colors per frame  |
-| Frame rate       | up to 24fps (any rational rate)   | ~10-11fps (uncapped)  |
-| Bytes/frame      | 7,680 (15 sectors)                 | 15,872 (31 sectors)   |
-| Required throughput @ target fps | ~180 KiB/s @ 24fps    | ~155-170 KiB/s @ 10-11fps |
+| Frame rate       | 15fps default, any rational rate via `--fps` | ~10-11fps (uncapped)  |
+| Bytes/frame      | 15,360 (30 sectors)                | 15,872 (31 sectors)   |
+| Required throughput @ target fps | ~225 KiB/s @ 15fps (default), ~360 KiB/s @ 24fps | ~155-170 KiB/s @ 10-11fps |
 
 ## Performance
 
-`src/decode.c` only unpacks packed 4-bit pixels into a plain 8bpp
-buffer at native (160x96) resolution -- it does no scaling at all.
-`src/player_v2.c` then draws that buffer 2x scaled via GraphX's own
-`gfx_ScaledSprite_NoClip()`, the same primitive `src/player_v1.c` (the
-legacy player) already uses at the same scale factor. An earlier
-version of `decode.c` did the unpacking *and* the 2x scaling itself, in
-a hand-written C loop; real-hardware testing showed that loop
-significantly slower than what v1 gets from GraphX's own scaler for
-the same job, so the scaling half of the work moved to the library
-instead of being redone by hand. The unpack step still uses a
-precomputed lookup table (nibble-shift arithmetic is expensive on the
-eZ80 core, which has no barrel shifter), verified byte-identical
-against an independent reference (`tests/test_decode_cross_check.py`),
-not just "still passes".
+v2's frame format and player went through a real redesign after
+real-hardware testing showed it falling well short of v1 (legacy)'s
+10-11fps despite moving less data per frame. The investigation that
+found why is worth recording, since both root causes were structural,
+not tuning:
+
+1. **No decode step at all, matching the original Cinema project this
+   one is a rewrite of.** An earlier version of CIN2 packed 2 pixels per
+   byte (4 bits each) to send half as much data per frame as the
+   original format. That required a per-frame unpack step (expanding
+   packed nibbles back to one byte per pixel, since GraphX's
+   `gfx_ScaledSprite_NoClip()` has no packed-4-bit sprite format) whose
+   CPU cost on the ez80 core -- which has no barrel shifter, so even a
+   lookup-table-based unpack isn't free -- outweighed the I/O it saved.
+   Comparing against
+   [wwierzbowski/cinema](https://github.com/wwierzbowski/cinema) (the
+   original project) made this obvious: its player reads frame pixels
+   directly off USB into the exact sprite buffer it draws from, no
+   decode step of any kind, and reaches 10-11fps despite needing *more*
+   I/O per frame than CIN2's packed format ever did. `src/player_v2.c`
+   now does the same thing: each read-ahead slot's buffer *is* a
+   `gfx_sprite_t`, so a frame's bytes land straight from
+   `msd_ReadAsync` into what `gfx_ScaledSprite_NoClip()` draws, with no
+   copy or unpack in between. CIN2 keeps its one real, uncontroversial
+   win over the original format (a palette shared by the whole movie,
+   installed once, instead of resent every frame) and drops the bit
+   packing that didn't pay for itself. See `docs/CIN2_FORMAT.md` for the
+   full before/after.
+
+2. **A redundant wait that starved USB reads of CPU time.**
+   `gfx_SwapDraw()`'s own documentation (`graphx.h`) says it does not
+   block -- instead "the next invocation of a graphx drawing function
+   will block... waiting for this event", and explicitly recommends
+   scheduling non-drawing logic in the gap where a drawing call would
+   otherwise block, rather than waiting explicitly. `player_v2.c` used
+   to call `gfx_Wait()` right after every `gfx_SwapDraw()`, which
+   burned exactly that window doing nothing instead of servicing
+   `usb_HandleEvents()` for the next frame's already-queued read. It's
+   gone now; the next frame's first draw call still waits correctly if
+   the LCD genuinely hasn't caught up, but no longer waits when there
+   was USB work it could have overlapped with instead.
 
 The build compiles at `-O3` (the CE Toolchain default is `-Oz`,
 optimize for *size*) -- free performance for a few extra KB of flash.
@@ -139,12 +170,14 @@ eating the gain. Cinema reads from USB continuously during playback,
 so there's no window where boosting is safe.
 
 Exit (or the live overlay, or Mode to pin it open) reports the
-player's own measured average decode time per frame and the FPS that
-implies as a ceiling *for the decoder alone* -- e.g. "decode avg: 12.500
-ms (decode ceiling: ~80 fps)" means decode isn't what's capping
-playback if the observed FPS is much lower than that ceiling; something
-else (USB read throughput, `gfx_Wait()`/LCD timing) is. That split is
-what makes further optimization work targeted instead of guesswork.
+player's own measured average per-frame blit time (labeled "decode" in
+the overlay for historical reasons -- there's no decode step left, just
+the GraphX scale-blit) and the FPS that implies as a ceiling *for that
+blit alone* -- e.g. "decode avg: 12.500 ms (decode ceiling: ~80 fps)"
+means the blit isn't what's capping playback if the observed FPS is
+much lower than that ceiling; something else (USB read throughput,
+`gfx_Wait()`/LCD timing) is. That split is what makes further
+optimization work targeted instead of guesswork.
 
 ## Known limitations
 
@@ -180,7 +213,7 @@ what makes further optimization work targeted instead of guesswork.
 ## Development / tests
 
 `tests/run_tests.sh` runs everything that can be validated without real
-calculator hardware: `src/decode.c`/`src/cin2.c` unit tests, structural
+calculator hardware: `src/cin2.c` unit tests, structural
 compilation of all calculator-side sources against transcribed CE
 toolchain headers, full player state-machine simulations (prefill,
 async slot handling, scheduling, pause, resume, error paths) against a

@@ -5,11 +5,25 @@
 #include "cin2.h"
 #include "fat32ro.h"
 
-/* Runs the Cinema v2 (CIN2) player: 4 persistent async read-ahead
- * slots, clock()-based rational-fps scheduling (24/1 or 24000/1001 or
- * anything else stored in the header), direct packed-4-bit-to-2x-scaled
- * decode straight into the display buffer (no sprite allocation, no
- * per-frame palette).
+/* The only geometry this player knows how to draw. A CIN2 frame is
+ * exactly WIDTH*HEIGHT bytes, one palette index (0..15) per pixel, no
+ * packing -- see src/player_v2.c's frame_slot_t comment for why v2
+ * dropped 4-bit packing (it used to halve this, at the cost of a
+ * per-frame unpack step that turned out to be the real bottleneck).
+ * There used to be a src/decode.c/decode.h for this unpack step; now
+ * that frames are raw pixels there's nothing left to decode, so these
+ * constants moved here instead. DEST_WIDTH/HEIGHT is the on-screen size
+ * after this player's 2x gfx_ScaledSprite_NoClip scale-up. */
+#define CINEMA_V2_WIDTH        160
+#define CINEMA_V2_HEIGHT        96
+#define CINEMA_V2_DEST_WIDTH   (CINEMA_V2_WIDTH * 2)
+#define CINEMA_V2_DEST_HEIGHT  (CINEMA_V2_HEIGHT * 2)
+
+/* Runs the Cinema v2 (CIN2) player: persistent async read-ahead slots
+ * whose buffers ARE the sprite data (frame bytes land straight from USB
+ * into what gfx_ScaledSprite_NoClip draws, no copy or unpack in
+ * between), clock()-based rational-fps scheduling (24/1 or 24000/1001 or
+ * anything else stored in the header).
  *
  * *header must already be validated (cin2_parse_header succeeded), and
  * header->width/height must equal CINEMA_V2_WIDTH/HEIGHT -- this player

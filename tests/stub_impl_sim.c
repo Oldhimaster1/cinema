@@ -229,7 +229,11 @@ unsigned g_buffer_mode_fills = 0;
 void gfx_Begin(void) {}
 void gfx_End(void) {}
 void gfx_SwapDraw(void) {}
-void gfx_Wait(void) { g_frames_rendered++; }
+/* No longer called by src/player_v2.c's real code (see its render_frame
+ * comment for why -- graphx.h's own docs say the explicit wait this used
+ * to pair with was redundant), but still defined here since the stub
+ * graphx.h header declares it and other code could still call it. */
+void gfx_Wait(void) {}
 void gfx_SetDraw(gfx_buffer_t mode) { g_draw_mode = mode; }
 void gfx_ZeroScreen(void) {}
 void gfx_SetPalette(const void *palette, uint24_t size, uint8_t offset)
@@ -241,10 +245,14 @@ gfx_sprite_t *gfx_AllocSprite(uint8_t width, uint8_t height,
     if (s) { s->width = width; s->height = height; }
     return s;
 }
+/* Counts a rendered frame here rather than in gfx_Wait(): render_frame()
+ * in src/player_v2.c calls this exactly once per frame unconditionally
+ * (unlike gfx_Wait(), which it no longer calls at all), so this is the
+ * accurate hook now. */
 void gfx_ScaledSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x,
                               uint8_t y, uint8_t width_scale,
                               uint8_t height_scale)
-{ (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale; }
+{ (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale; g_frames_rendered++; }
 
 /* --- test accessors for the appvar store ------------------------------ */
 

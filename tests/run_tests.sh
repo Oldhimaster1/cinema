@@ -3,10 +3,9 @@
 # available in most dev environments, so these tests validate what can
 # be validated on a normal machine:
 #
-#   1. Pure logic (src/decode.c, src/cin2.c) compiled and unit-tested
-#      directly with the host compiler -- these two files are
-#      deliberately free of calculator-specific headers for exactly
-#      this reason.
+#   1. Pure logic (src/cin2.c) compiled and unit-tested directly with
+#      the host compiler -- deliberately free of calculator-specific
+#      headers for exactly this reason.
 #   2. Structural validation of the calculator-only sources (main.c,
 #      player_v1.c, player_v2.c, msd_util.c) by compiling and linking
 #      them against hand-written stub headers/implementations of
@@ -41,14 +40,14 @@ run_step() {
     pass "$name"
 }
 
-test_decode_and_cin2() {
-    $CC $CFLAGS -o "$TMP/test_decode" tests/test_decode.c src/decode.c src/cin2.c
-    "$TMP/test_decode"
+test_cin2() {
+    $CC $CFLAGS -o "$TMP/test_cin2" tests/test_cin2.c src/cin2.c
+    "$TMP/test_cin2"
 }
 
 test_structural_link() {
     $CC $STUB_CFLAGS \
-        src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c src/decode.c \
+        src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c \
         src/fat32ro.c \
         tests/stub_impl.c -o "$TMP/cinema_stub_link"
     "$TMP/cinema_stub_link"
@@ -56,7 +55,7 @@ test_structural_link() {
 
 test_player_v2_sim() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
-        src/player_v2.c src/decode.c src/cin2.c src/msd_util.c src/fat32ro.c \
+        src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim.c -o "$TMP/test_player_v2_sim"
     timeout 30 "$TMP/test_player_v2_sim"
 }
@@ -79,10 +78,11 @@ test_encoder() {
         return 0
     fi
     python3 -m pytest -q tests/test_cin2_format.py tests/test_encode_cin2.py \
-        tests/test_decode_cross_check.py
+        tests/test_fixtures.py tests/test_frame_rate_boundaries.py \
+        tests/test_fuzz_cin2_header.py
 }
 
-run_step "decode.c / cin2.c host unit tests"        test_decode_and_cin2
+run_step "cin2.c host unit tests"                   test_cin2
 run_step "fat32ro.c host unit tests"                test_fat32ro
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim

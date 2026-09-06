@@ -5,12 +5,13 @@ Single-file, no sibling modules required (just this script + ffmpeg on
 PATH + `pip install pillow`). See docs/CIN2_FORMAT.md in the Cinema repo
 for the on-disk format this produces: a 512-byte header (magic,
 resolution, frame rate, frame count, one shared 16-color palette)
-followed by 160x96 packed-4-bit frames, 15 sectors each.
+followed by 160x96 frames of one byte per pixel (0..15, unpacked), 30
+sectors each.
 
 Usage:
 
     python3 encode_cin2.py input.mp4 output.bin \\
-        [--fps 24] [--palette-samples 32] [--start 0] [--duration 60] \\
+        [--fps 15] [--palette-samples 32] [--start 0] [--duration 60] \\
         [--jobs N]
 
 Then write output.bin to a USB drive starting at LBA 0/byte 0, e.g.:
@@ -75,10 +76,14 @@ PALETTE_ENTRIES = 16
 
 WIDTH = 160
 HEIGHT = 96
-PACKED_BYTES = (WIDTH * HEIGHT) // 2
-FRAME_SECTORS = 15
+# One byte per pixel (0..15), not bit-packed -- see docs/CIN2_FORMAT.md's
+# "Why a new format" section for why v2 dropped 4-bit packing after
+# real-hardware testing showed the CPU cost of unpacking it back out on
+# the ez80 core cost more than the packing saved.
+FRAME_BYTES = WIDTH * HEIGHT
+FRAME_SECTORS = 30
 SECTOR_BYTES = 512
-assert FRAME_SECTORS * SECTOR_BYTES == PACKED_BYTES
+assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
 
 RAW_FRAME_BYTES = WIDTH * HEIGHT * 3  # rgb24 from ffmpeg
 
@@ -116,18 +121,13 @@ def build_header(header: Cin2Header) -> bytes:
     return bytes(buf)
 
 
-def pack_frame(indices: Sequence[int]) -> bytes:
+def encode_frame(indices: Sequence[int]) -> bytes:
     """indices: WIDTH*HEIGHT palette indices (0..15), row-major. Returns
-    PACKED_BYTES bytes: {left<<4 | right} per horizontally adjacent pair."""
+    FRAME_BYTES bytes, one per pixel, unpacked -- this is exactly what
+    lands in the calculator's sprite buffer straight off the USB read."""
     if len(indices) != WIDTH * HEIGHT:
         raise ValueError(f"expected {WIDTH * HEIGHT} indices, got {len(indices)}")
-
-    out = bytearray(PACKED_BYTES)
-    for i in range(0, len(indices), 2):
-        left = indices[i]
-        right = indices[i + 1]
-        out[i // 2] = ((left & 0x0F) << 4) | (right & 0x0F)
-    return bytes(out)
+    return bytes(min(max(i, 0), 15) for i in indices)
 
 
 def rgb888_to_rgb1555(r: int, g: int, b: int) -> int:
@@ -322,7 +322,7 @@ def _pool_init(palette_png_bytes: bytes) -> None:
 def _pool_quantize_and_pack(raw_rgb: bytes) -> bytes:
     assert _worker_palette_image is not None
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return pack_frame(quantize_frame(image, _worker_palette_image))
+    return encode_frame(quantize_frame(image, _worker_palette_image))
 
 
 def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
@@ -417,7 +417,7 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         partial_path.unlink(missing_ok=True)
         raise
 
-    total_bytes = HEADER_BYTES + frame_count * PACKED_BYTES
+    total_bytes = HEADER_BYTES + frame_count * FRAME_BYTES
     duration_s = frame_count * fps_den / fps_num
     throughput_kib_s = (FRAME_SECTORS * SECTOR_BYTES * fps_num / fps_den) / 1024
     print(f"wrote {output_path}: {frame_count} frames, "
@@ -430,7 +430,7 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
 def _pool_quantize_and_pack_single(raw_rgb: bytes, palette_image: Image.Image) -> bytes:
     """--jobs 1 path: same work as _pool_quantize_and_pack, no pool."""
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return pack_frame(quantize_frame(image, palette_image))
+    return encode_frame(quantize_frame(image, palette_image))
 
 
 def _self_check(path: Path, expected_frame_count: int) -> None:
@@ -455,7 +455,7 @@ def _self_check(path: Path, expected_frame_count: int) -> None:
         raise RuntimeError(
             f"self-check failed: header frame_count {frame_count} != {expected_frame_count}")
 
-    expected_size = HEADER_BYTES + frame_count * PACKED_BYTES
+    expected_size = HEADER_BYTES + frame_count * FRAME_BYTES
     if len(raw) != expected_size:
         raise RuntimeError(
             f"self-check failed: file size {len(raw)} != expected {expected_size}")
@@ -475,8 +475,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("video", type=Path, help="input video file (anything ffmpeg can decode)")
     parser.add_argument("output", type=Path, help="output file to raw-copy to a USB drive")
-    parser.add_argument("--fps", type=parse_fps, default=(24, 1),
-                         help="target frame rate as N or N/D, e.g. 24 or 24000/1001 (default: 24)")
+    parser.add_argument("--fps", type=parse_fps, default=(15, 1),
+                         help="target frame rate as N or N/D, e.g. 24 or 24000/1001 "
+                              "(default: 15 -- at 15,360 bytes/frame this fits the "
+                              "CE Toolchain's documented ~262-273 KiB/s tested USB "
+                              "throughput with headroom; 24fps needs ~360 KiB/s, "
+                              "above that budget on a typical drive)")
     parser.add_argument("--palette-samples", type=int, default=32,
                          help="number of frames sampled to build the global "
                               "16-color palette (default: 32)")

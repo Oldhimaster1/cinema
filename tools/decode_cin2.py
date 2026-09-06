@@ -11,7 +11,7 @@ Usage:
 
 Each PNG is written at both native 160x96 ("*_native.png") and the
 scaled 320x192 the calculator actually draws ("*_scaled.png", plain
-nearest-neighbor 2x, matching src/decode.c's blit exactly).
+nearest-neighbor 2x, matching src/player_v2.c's blit exactly).
 """
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ def frame_indices(raw: bytes, header: fmt.Cin2Header, frame_number: int) -> list
     if frame_number >= header.frame_count:
         raise ValueError(f"frame {frame_number} >= frame_count {header.frame_count}")
     start = fmt.frame_lba(frame_number) * fmt.SECTOR_BYTES
-    end = start + fmt.PACKED_BYTES
+    end = start + fmt.FRAME_BYTES
     if end > len(raw):
         raise ValueError(f"frame {frame_number} data truncated in file")
-    return fmt.unpack_frame(raw[start:end])
+    return fmt.decode_frame(raw[start:end])
 
 
 def indices_to_rgb_image(indices: list[int], header: fmt.Cin2Header) -> Image.Image:
@@ -63,10 +63,10 @@ def indices_to_rgb_image(indices: list[int], header: fmt.Cin2Header) -> Image.Im
 
 
 def scale_2x_nearest(img: Image.Image) -> Image.Image:
-    """Matches what the calculator actually displays: src/decode.c
-    unpacks at native resolution (no scaling), then player_v2.c draws it
-    with GraphX's gfx_ScaledSprite_NoClip(..., 2, 2) -- plain
-    nearest-neighbor 2x, no interpolation, same as this."""
+    """Matches what the calculator actually displays: src/player_v2.c
+    reads each frame's raw pixel bytes straight into a sprite (no decode
+    step at all) and draws it with GraphX's gfx_ScaledSprite_NoClip(...,
+    2, 2) -- plain nearest-neighbor 2x, no interpolation, same as this."""
     return img.resize((img.width * 2, img.height * 2), Image.Resampling.NEAREST)
 
 

@@ -3,7 +3,7 @@
 
 /* CIN2 header / resume-record parsing. Pure byte-level logic, no
  * calculator-specific headers, so this compiles and is unit-tested on a
- * host machine too -- see tests/test_decode.c. Binary layout is defined
+ * host machine too -- see tests/test_cin2.c. Binary layout is defined
  * in docs/CIN2_FORMAT.md; keep both in sync. */
 
 #include <stdint.h>
@@ -14,7 +14,12 @@
 #define CIN2_HEADER_BYTES  512
 #define CIN2_CRC_BYTES     22  /* bytes [0, 22) covered by header_crc32 */
 #define CIN2_DATA_LBA      1
-#define CIN2_FRAME_SECTORS 15
+/* One byte per pixel (160*96 = 15,360 bytes = 30 sectors), not bit-packed:
+ * see src/player_v2.c's frame_slot_t comment for why -- real hardware
+ * testing traced most of v2's decode-ceiling gap to the CPU cost of
+ * unpacking bit-packed pixels on the ez80 core, which outweighed the I/O
+ * savings from packing them in the first place. */
+#define CIN2_FRAME_SECTORS 30
 
 typedef struct {
     uint16_t width;

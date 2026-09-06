@@ -24,7 +24,7 @@ def _well_formed_raw() -> bytes:
                              frame_count=4, palette=[0] * 16)
     raw = bytearray(fmt.build_header(header))
     for f in range(4):
-        raw += fmt.pack_frame([0] * (fmt.WIDTH * fmt.HEIGHT))
+        raw += fmt.encode_frame([0] * (fmt.WIDTH * fmt.HEIGHT))
     return bytes(raw)
 
 

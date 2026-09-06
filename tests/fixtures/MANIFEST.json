@@ -3,14 +3,14 @@
     "bad_header_crc": {
       "file": "bad_header_crc.bin",
       "note": "one CRC byte flipped",
-      "sha256": "e54b19a3d2e139ed829975185b7a8582c37bc7604621b5b3222a82d3198dc387",
-      "size": 31232
+      "sha256": "3a2ead2d989042733f23efd009792500d538ee3d802f67813473952d4ce4ad68",
+      "size": 61952
     },
     "bad_magic": {
       "file": "bad_magic.bin",
       "note": "magic changed from CIN2 to CIN1",
-      "sha256": "97088243f5a538e7a0aa9ff468e95224b3a9a07f26ca2fe7593c372b8e2946e7",
-      "size": 31232
+      "sha256": "639f28ba10615579a02bb98b80013308a3fc8e5e2af81c47a5ce88c5ef3f5b14",
+      "size": 61952
     },
     "huge_frame_count": {
       "file": "huge_frame_count.bin",
@@ -21,20 +21,20 @@
     "nonzero_reserved": {
       "file": "nonzero_reserved.bin",
       "note": "one reserved byte (offset 100) set nonzero",
-      "sha256": "ae6f94b355965048a62864a5c3232514d77e9b198efd92ecc143241a9748acd8",
-      "size": 31232
+      "sha256": "db4c66f4685918efdc7d557a8be021f3e3fa59b54aca18314f9ad31ea9b2dbcb",
+      "size": 61952
     },
     "trailing_data": {
       "file": "trailing_data.bin",
       "note": "37 stray bytes appended after the last frame (verifier: warning, not failure, on its own -- listed under bad/ here only because it's a malformed-media probe, see tests/test_fixtures.py for the exact expected outcome)",
-      "sha256": "579147bc231bf0a03680c2c6a7646ab10f07067a171640caff975b95e9b47cbb",
-      "size": 31269
+      "sha256": "ee5f8505815ba549eb6b414d80bbb94cf354aff54d3897e3075e9da32305103f",
+      "size": 61989
     },
     "truncated_frame": {
       "file": "truncated_frame.bin",
       "note": "header plus half of frame 0's data; frames 1-3 and the rest of frame 0 missing",
-      "sha256": "e5b588346f6f5e61fcd765606635544b6b5bbff1184c1647e51fac003b27926f",
-      "size": 4352
+      "sha256": "98369a5aa804f4bad8d1251dd5834e374567576f63c185572535a0d3fb06056e",
+      "size": 8192
     },
     "truncated_header": {
       "file": "truncated_header.bin",
@@ -45,14 +45,14 @@
     "unknown_flags": {
       "file": "unknown_flags.bin",
       "note": "flags byte set to 0x01 (also invalidates the CRC, since flags is CRC-covered -- rejection is still due to the flags byte changing)",
-      "sha256": "84aeb202dafe4e4c707ccdeeba3df9ec937ef936ac7925f6f0c634045850cf50",
-      "size": 31232
+      "sha256": "823c902c8c527fa468eb81d002507dbce6f636f03005a7108e8c43a7ba1a5a60",
+      "size": 61952
     },
     "unsupported_version": {
       "file": "unsupported_version.bin",
       "note": "version byte set to 99",
-      "sha256": "47887c4e4cefc14a5f7812e11f7957de2ce467a5ebddd5a3d471eb63c392a5c3",
-      "size": 31232
+      "sha256": "2e15f810c4c63acfb0a1a154523411fc26a164bc7879156d0ce891d81353514f",
+      "size": 61952
     },
     "v1_synthetic": {
       "file": "v1_synthetic.bin",
@@ -69,14 +69,14 @@
     "zero_fps_den": {
       "file": "zero_fps_den.bin",
       "note": "fps_den=0 (would divide by zero in the scheduler)",
-      "sha256": "f1ca2fda923979b725f4d0010803caeba8bb580c64f208be700045dc87d4792b",
-      "size": 31232
+      "sha256": "671570853cdea95d5af895a68f4d5bbf0693fa400789eef15e5ab80f7a42f6f8",
+      "size": 61952
     },
     "zero_fps_num": {
       "file": "zero_fps_num.bin",
       "note": "fps_num=0 with a correct CRC",
-      "sha256": "9a710d02e14a0416a8193fc67f1ea6a201d439dd1e5283e08cf16b735a1e1088",
-      "size": 31232
+      "sha256": "118cddebe5bc588068fcc397d083fe57cf114995b82e8fd941b0fa88ed323313",
+      "size": 61952
     },
     "zero_frame_count": {
       "file": "zero_frame_count.bin",
@@ -87,14 +87,14 @@
     "zero_height_good_crc": {
       "file": "zero_height_good_crc.bin",
       "note": "height=0 with a correct CRC",
-      "sha256": "c7739b41b43542eebc42309783ce320fb9dca3ff9b1a22360c29de2aba716305",
-      "size": 31232
+      "sha256": "85c62a32e1f03e9e86b6b1d275d9c4dd521bf121e3341221df8f6dd52ee20712",
+      "size": 61952
     },
     "zero_width_good_crc": {
       "file": "zero_width_good_crc.bin",
       "note": "width=0 with a correct CRC over the corrupted header -- exercises the dimension check specifically, not the CRC check",
-      "sha256": "8294b4475d5cda1df9bf55bfc9cad3204b843f6383994e747572f18028af59cf",
-      "size": 31232
+      "sha256": "66f3fea8c726f6c8a17476e72013af1c0f5039ced2cd3ef9e9a94e72b17f4c92",
+      "size": 61952
     }
   },
   "good": {
@@ -102,85 +102,85 @@
       "expected_verifier_ok": true,
       "file": "all_black.bin",
       "note": "single frame, every pixel index 0",
-      "sha256": "93f010f195318b053a51197160a2bced5a001ad940d4a39d60dc5ece659abfd5",
-      "size": 8192
+      "sha256": "57cc67cf751127f251697c9d6687b30c32595d60e907d2f0bc6578a8d1abd7ae",
+      "size": 15872
     },
     "all_max_index": {
       "expected_verifier_ok": true,
       "file": "all_max_index.bin",
-      "note": "single frame, every pixel index 15 (0xFF packed bytes)",
-      "sha256": "2c159eff2858a6606b5c11db029801a072d27743a93f9b43fe3f48df03d02bfa",
-      "size": 8192
+      "note": "single frame, every pixel index 15 (max palette index, one byte each)",
+      "sha256": "5ab88a75aa00738c4f6f5a61438c47aa369d9e950a17e4efc9271430949a84d6",
+      "size": 15872
     },
     "alternating_nibbles": {
       "expected_verifier_ok": true,
       "file": "alternating_nibbles.bin",
-      "note": "index alternates 0,15,0,15... each row -> packed bytes are all 0x0F",
-      "sha256": "a27f039a96416a223638ae9abaf7afb5177c5c8c881ba13b9ed088f0b198c82d",
-      "size": 8192
+      "note": "index alternates 0,15,0,15... across each row",
+      "sha256": "df1ca8ba68e886c425eefcf5789da3c8f1b34af11a695c7739a1a9b446b07faa",
+      "size": 15872
     },
     "bottom_right_pixel_only": {
       "expected_verifier_ok": true,
       "file": "bottom_right_pixel_only.bin",
       "note": "only the last logical pixel (bottom-right) is nonzero; detects last-pixel/off-by-one edge cases",
-      "sha256": "3716857ef35410264f7978c96bbe7b0f951bbeedbc5482afb7d09ae9b00a3ba1",
-      "size": 8192
+      "sha256": "278b07313c6a186ed25f31de5653ce429e18c23b3aec497eb7407925a929019d",
+      "size": 15872
     },
     "color_bars_16": {
       "expected_verifier_ok": true,
       "file": "color_bars_16.bin",
       "note": "16 vertical bars, one per palette entry",
-      "sha256": "58b40f5e5d1bf57af46376764332d748801d7a94705178cfa05e33fa217c79f7",
-      "size": 8192
+      "sha256": "4b28df165eae49389e932196f469738a86210eb5b3f35a384799b37c47d76db3",
+      "size": 15872
     },
     "five_frame_movie": {
       "expected_verifier_ok": true,
       "file": "five_frame_movie.bin",
       "note": "exactly 5 frames -- first slot-queue refill after prefill",
-      "sha256": "3e59f4b4d9e1c7f342fb873a1459b8d78c8de17c09e9bd305473af26b275b347",
-      "size": 38912
+      "sha256": "217f3eebd1ea7850536f7f4ab7f4e971096233069e0d57d2aeaaf5fc9c0215fc",
+      "size": 77312
     },
     "four_frame_movie": {
       "expected_verifier_ok": true,
       "file": "four_frame_movie.bin",
-      "note": "exactly 4 frames -- matches the player's slot count exactly",
-      "sha256": "fecb4dac4d7b29b71cb4ce741dab22ef88bdd7652a9eeb9813bd313889ffa2dc",
-      "size": 31232
+      "note": "exactly 4 frames -- a small multi-frame movie, more frames than the player's current read-ahead slot count",
+      "sha256": "ee627457a230e5ab4798d363a733ab5d7587d96eddc986a4c2c0ba5aacde758e",
+      "size": 61952
     },
     "one_frame_movie": {
       "expected_verifier_ok": true,
       "file": "one_frame_movie.bin",
       "note": "exactly 1 frame -- smallest legal movie",
-      "sha256": "4eba3009b6faab3e68bc781db2f7ae7ac65411808826cde04e9d34860e922507",
-      "size": 8192
+      "sha256": "8fdfcdc19776977689968a52cbb5e9f08e5c260a6d3e3ec4d3bf994909d0d925",
+      "size": 15872
     },
     "resume_fixture": {
       "expected_verifier_ok": true,
       "file": "resume_fixture.bin",
       "note": "30 frames (1.25s @ 24fps) with a frame-number marker block, for resume-position tests",
-      "sha256": "66cb77763c78fff10095e7747c6de1227466c2b8056cb37d74c4891c057ec4b0",
-      "size": 230912
+      "sha256": "0574b0e7e51831ea12f8059f0523f7e6a278209a1005dcbc1c568965f2c49557",
+      "size": 461312
     },
     "short_24000_1001": {
       "expected_verifier_ok": true,
       "file": "short_24000_1001.bin",
       "note": "24 frames @ 24000/1001 = 1.001s; distinct duration from short_24_1",
-      "sha256": "a89d8daafdd681b6913a5fc6d74c73a1c9e15a4ba2452a4d564a7e4f1d454162",
-      "size": 184832
+      "sha256": "704f9f9bedab840b677ac92469f15fe0f56d3782793dcf231feddb2b9d9ec6c5",
+      "size": 369152
     },
     "short_24_1": {
       "expected_verifier_ok": true,
       "file": "short_24_1.bin",
       "note": "24 frames @ 24/1 = exactly 1.0s; frame-number marker block top-left",
-      "sha256": "82fb759c68869d9d50cc28093fdb8731e48f53feca052deec634a16fce2c5ae6",
-      "size": 184832
+      "sha256": "cfe305fa042b40f55cef7213d189d36a5091ce1df485a8b724f606527da5fa55",
+      "size": 369152
     },
     "unique_pattern_per_row": {
       "expected_verifier_ok": true,
       "file": "unique_pattern_per_row.bin",
       "note": "row y is solid index (y % 16); detects row-stride/vertical placement bugs",
-      "sha256": "ee35e5b0edc0fb32380bc0da25a62c84ff7d7f0efa777fc7ee8211068e335979",
-      "size": 8192
+      "sha256": "5c2e4d31742441196e42356f4c574069f93f56af47a50b87b62788076ed90744",
+      "size": 15872
     }
   }
 }

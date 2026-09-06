@@ -30,8 +30,8 @@
  *   - Writing anything. This module never issues a write.
  *
  * No calculator-specific headers are included here on purpose, so this
- * file is host-testable like src/cin2.c and src/decode.c -- see
- * tests/test_fat32ro.c. The caller supplies a sector-read callback
+ * file is host-testable like src/cin2.c -- see tests/test_fat32ro.c.
+ * The caller supplies a sector-read callback
  * (mirroring msd_Read's shape exactly) so the same code runs against a
  * synthetic in-memory disk image on a host machine and against the real
  * msd_t on the calculator.

@@ -5,7 +5,6 @@
 #include "../src/cin2.h"
 #include "../src/fat32ro.h"
 #include "../src/player_v2.h"
-#include "../src/decode.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -74,7 +73,7 @@ static uint8_t *build_synthetic_drive(uint32_t frame_count, uint32_t *out_sector
          * test (only slot bookkeeping does), but a recognizable pattern
          * makes failures easier to debug than all-zero frames would. */
         memset(frame_bytes, (int)(((f & 0x0F) << 4) | (f & 0x0F)),
-               CINEMA_V2_PACKED_BYTES);
+               CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT);
     }
 
     *out_sectors = sectors;
@@ -201,18 +200,23 @@ static void test_single_frame_movie(void)
 
     CHECK(ok, "1-frame movie plays to completion");
     CHECK(g_frames_rendered == 1, "exactly 1 frame rendered");
-    CHECK(g_async_reads == 1, "only 1 read ever queued (3 slots stay empty, never overfilled)");
+    CHECK(g_async_reads == 1, "only 1 read ever queued (1 slot stays empty, never overfilled)");
 
     free(drive);
 }
 
-static void test_exact_four_frame_movie(void)
+static void test_exact_slot_count_frame_movie(void)
 {
-    /* frame_count == SLOT_COUNT: prefill exactly fills every slot with
-     * no frames left to queue afterwards -- the boundary case for
-     * refill_empty_slots' "nothing left to queue" path. */
+    /* frame_count == SLOT_COUNT (2): prefill exactly fills every slot
+     * with no frames left to queue afterwards -- the boundary case for
+     * refill_empty_slots' "nothing left to queue" path. This hardcodes
+     * 2 to match src/player_v2.c's current SLOT_COUNT, the same way it
+     * hardcoded 4 before SLOT_COUNT dropped from 4 to 2 (raw, unpacked
+     * frames only need half as many read-ahead slots to use the same
+     * RAM) -- SLOT_COUNT isn't exposed outside player_v2.c, so this
+     * test can't reference it directly. */
     uint32_t sectors;
-    uint8_t *drive = build_synthetic_drive(4, &sectors);
+    uint8_t *drive = build_synthetic_drive(2, &sectors);
     global_t global;
     cin2_header_t header;
     bool ok;
@@ -220,7 +224,7 @@ static void test_exact_four_frame_movie(void)
     memset(&global, 0, sizeof(global));
     global.usb = (usb_device_t)(uintptr_t)1;
     sim_set_drive(drive, sectors);
-    CHECK(cin2_parse_header(drive, &header), "4-frame header parses");
+    CHECK(cin2_parse_header(drive, &header), "2-frame header parses");
 
     g_frames_rendered = 0;
     g_async_reads = 0;
@@ -230,9 +234,9 @@ static void test_exact_four_frame_movie(void)
         ok = player_v2_run(&global, &header, 0, &map, "");
     }
 
-    CHECK(ok, "exact 4-frame movie plays to completion");
-    CHECK(g_frames_rendered == 4, "exactly 4 frames rendered");
-    CHECK(g_async_reads == 4, "exactly 4 reads total, none beyond frame_count");
+    CHECK(ok, "exact 2-frame movie plays to completion");
+    CHECK(g_frames_rendered == 2, "exactly 2 frames rendered");
+    CHECK(g_async_reads == 2, "exactly 2 reads total, none beyond frame_count");
 
     free(drive);
 }
@@ -331,7 +335,7 @@ int main(void)
     test_resume_starts_mid_movie();
     test_read_error_is_fatal_and_reported();
     test_single_frame_movie();
-    test_exact_four_frame_movie();
+    test_exact_slot_count_frame_movie();
     test_seek_while_paused_resumes_and_jumps_forward();
     test_empty_movie_rejected();
 

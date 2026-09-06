@@ -1,5 +1,4 @@
 #include "player_v2.h"
-#include "decode.h"
 #include "fat32ro.h"
 #include "msd_util.h"
 
@@ -15,9 +14,13 @@
 #include <string.h>
 #include <time.h>
 
-#define SLOT_COUNT 4
-
-/* 4 slots * 1/24s per frame = ~166ms of read-ahead buffer. */
+/* 2, not 4: frames are no longer bit-packed (see frame_slot_t below),
+ * so each slot's buffer doubled in size. Halving the slot count keeps
+ * total slot RAM the same as before (2 * 15,362 =~ 4 * 7,682) instead of
+ * doubling it. 2 slots is exactly the double-buffering depth Cinema's
+ * v1 (legacy) player has always used successfully at this same frame
+ * size, so this isn't a step into the unknown. */
+#define SLOT_COUNT 2
 
 #define V2_Y_OFFSET ((GFX_LCD_HEIGHT - CINEMA_V2_DEST_HEIGHT) / 2)
 
@@ -64,7 +67,19 @@ typedef struct {
 } frame_part_t;
 
 typedef struct {
-    uint8_t packed[CINEMA_V2_PACKED_BYTES];
+    /* gfx_sprite_t-shaped (2-byte width/height header + pixel data), and
+     * used as one: a frame's bytes are read off USB directly into
+     * sprite_data + 2 (see queue_slot_part), and render_frame passes
+     * this straight to gfx_ScaledSprite_NoClip with no copy or unpack
+     * step in between. This is deliberately the same zero-decode design
+     * Cinema's v1 (legacy) player uses -- an earlier version of v2
+     * stored frames bit-packed 2-per-byte to halve the USB read size,
+     * but real-hardware testing traced most of the resulting slowdown to
+     * the CPU cost of unpacking that packing back out every frame on the
+     * ez80 core, which cost more than the packing saved. width/height
+     * are set once per slot, in player_v2_run(); nothing after that ever
+     * changes them, so there's no per-frame header-writing cost either. */
+    uint8_t sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
     uint32_t frame_number;
     volatile slot_state_t state;
     volatile msd_error_t error;
@@ -80,12 +95,10 @@ typedef struct {
     uint8_t next_pending_part;
 } frame_slot_t;
 
-/* Native-resolution (unscaled) sprite each frame is unpacked into --
- * see decode.h for why decode.c itself no longer scales. width/height
- * are set once, in player_v2_run(); gfx_UninitedSprite() only reserves
- * the memory, it doesn't fill in the sprite header. */
-static uint8_t movie_sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
-static gfx_sprite_t *const movie_sprite = (gfx_sprite_t *)movie_sprite_data;
+static gfx_sprite_t *slot_sprite(frame_slot_t *slot)
+{
+    return (gfx_sprite_t *)slot->sprite_data;
+}
 
 typedef struct {
     global_t *global;
@@ -201,7 +214,7 @@ static msd_error_t queue_slot_part(global_t *global, frame_slot_t *slot)
     slot->transfer.msd = &global->msd;
     slot->transfer.lba = slot->pending_parts[idx].lba;
     slot->transfer.count = slot->pending_parts[idx].sectors;
-    slot->transfer.buffer = slot->packed + byte_offset;
+    slot->transfer.buffer = slot_sprite(slot)->data + byte_offset;
     slot->transfer.callback = frame_read_callback;
     slot->transfer.userptr = slot;
 
@@ -568,7 +581,7 @@ static void draw_osd(player_v2_t *player)
 }
 
 /* Waits until no slot has a transfer in flight. Required before reusing
- * slot buffers on a seek: msd_ReadAsync owns slot->packed until its
+ * slot buffers on a seek: msd_ReadAsync owns slot->sprite_data until its
  * callback fires, and there is no cancel in the msddrvce API. */
 static void drain_loading_slots(player_v2_t *player)
 {
@@ -682,17 +695,17 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
      * persistent mode, not reset by gfx_SwapDraw() -- it only needs to
      * be set once, which player_v2_run() already does during setup.
      *
-     * Unpacking is now just the 4-bit-to-8bpp expansion (no scaling --
-     * see decode.h); the actual 2x scale-up is GraphX's own
-     * gfx_ScaledSprite_NoClip(), the same primitive Cinema's v1 (legacy)
-     * player already uses successfully at this exact scale factor. A
-     * hand-written unpack+scale loop here previously measured far
-     * slower on real hardware than v1's library-driven scaling does. */
-    cinema_unpack_packed4(slot->packed, movie_sprite->data);
-    gfx_ScaledSprite_NoClip(movie_sprite, 0, V2_Y_OFFSET, 2, 2);
+     * There is no unpack/decode step at all: slot's buffer already IS
+     * the sprite gfx_ScaledSprite_NoClip draws from (see frame_slot_t),
+     * frame bytes landed there straight from the USB read. The 2x
+     * scale-up is GraphX's own library routine, the same one Cinema's
+     * v1 (legacy) player uses successfully at this exact scale factor. */
+    gfx_ScaledSprite_NoClip(slot_sprite(slot), 0, V2_Y_OFFSET, 2, 2);
 
-    /* Measured around the blit only -- not the OSD, not the swap wait --
-     * so the reported number is the decoder's own cost. */
+    /* "decode" is a bit of a misnomer now (there's nothing left to
+     * decode) -- this measures the blit alone, not the OSD or the swap,
+     * so it's still the number to watch for GraphX-scaling cost
+     * specifically, separate from USB read time. */
     player->decode_ticks_total += (uint32_t)(clock() - decode_start);
     player->decode_samples++;
 
@@ -705,8 +718,19 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
         player->osd_clear_pending--;
     }
 
+    /* No gfx_Wait() here, deliberately: graphx.h's own documentation
+     * says gfx_SwapDraw() does not block -- instead "the next invocation
+     * of a graphx drawing function will block... waiting for this
+     * event", and explicitly recommends scheduling non-drawing logic
+     * (for us: usb_HandleEvents()/refill_empty_slots() back in
+     * player_v2_loop) in the gap where a drawing call would otherwise
+     * block, rather than an explicit gfx_Wait() that just burns that
+     * same window doing nothing. The next frame's first draw call
+     * (gfx_ScaledSprite_NoClip, at the top of the next render_frame) still
+     * waits correctly if the LCD genuinely hasn't caught up yet -- this
+     * only removes the case where we blocked for no reason while a
+     * background USB read could have been making progress instead. */
     gfx_SwapDraw();
-    gfx_Wait();
 
     player->fps_window_frames++;
     {
@@ -954,6 +978,16 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.start_frame = start_frame;
     player.next_frame_to_queue = start_frame;
     choose_osd_colors(&player, header);
+    {
+        uint8_t i;
+
+        for (i = 0; i < SLOT_COUNT; ++i) {
+            gfx_sprite_t *sprite = slot_sprite(&player.slots[i]);
+
+            sprite->width = CINEMA_V2_WIDTH;
+            sprite->height = CINEMA_V2_HEIGHT;
+        }
+    }
 
     /* Prefill runs here, before gfx_Begin() -- it doesn't touch graphics
      * at all, and keeping it out of graphics mode means a prefill error
@@ -962,9 +996,6 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     ok = prefill_frames(&player);
 
     if (ok) {
-        movie_sprite->width = CINEMA_V2_WIDTH;
-        movie_sprite->height = CINEMA_V2_HEIGHT;
-
         gfx_Begin();
         graphics_active = true;
         gfx_SetPalette(header->palette, sizeof(header->palette), 0);

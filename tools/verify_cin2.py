@@ -28,16 +28,16 @@ VERSION = 2
 HEADER_BYTES = 512
 CRC_BYTES = 22
 DATA_LBA = 1
-FRAME_SECTORS = 15
+FRAME_SECTORS = 30
 SECTOR_BYTES = 512
 PALETTE_ENTRIES = 16
 WIDTH = 160
 HEIGHT = 96
-PACKED_BYTES = (WIDTH * HEIGHT) // 2
-# 15 sectors/frame * 512 bytes must equal one packed frame exactly --
-# this is a spec invariant, not something a header field asserts, so
-# check it once here rather than trusting it.
-assert FRAME_SECTORS * SECTOR_BYTES == PACKED_BYTES
+FRAME_BYTES = WIDTH * HEIGHT  # one byte/pixel (0..15), not bit-packed
+# 30 sectors/frame * 512 bytes must equal one frame exactly -- this is a
+# spec invariant, not something a header field asserts, so check it once
+# here rather than trusting it.
+assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
 
 
 def fail(errors: list, msg: str) -> None:
@@ -111,8 +111,6 @@ def verify(path: Path) -> dict:
         fail(errors, f"zero dimension: {width}x{height}")
     elif width != WIDTH or height != HEIGHT:
         fail(errors, f"unsupported resolution {width}x{height} (only {WIDTH}x{HEIGHT} is decodable)")
-    elif width % 2 != 0:
-        fail(errors, "width must be even (two 4-bit pixels pack per byte)")
 
     # --- fps -------------------------------------------------------------
     if fps_num == 0:
@@ -126,9 +124,9 @@ def verify(path: Path) -> dict:
     # 32/64-bit ranges the way the C/ez80 code would compute it, so an
     # enormous frame_count can't be missed via silent overflow here either.
     if width == WIDTH and height == HEIGHT:
-        bytes_per_frame = (width * height) // 2
-        if bytes_per_frame != PACKED_BYTES:
-            fail(errors, f"computed bytes/frame {bytes_per_frame} != spec PACKED_BYTES {PACKED_BYTES}")
+        bytes_per_frame = width * height
+        if bytes_per_frame != FRAME_BYTES:
+            fail(errors, f"computed bytes/frame {bytes_per_frame} != spec FRAME_BYTES {FRAME_BYTES}")
 
     required_sectors = DATA_LBA + frame_count * FRAME_SECTORS
     required_bytes = required_sectors * SECTOR_BYTES

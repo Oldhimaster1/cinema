@@ -1,11 +1,16 @@
-/* Host-side unit tests for src/decode.c and src/cin2.c.
+/* Host-side unit tests for src/cin2.c.
  *
- * These two files are deliberately free of calculator-specific headers
- * so they can be compiled and tested with a normal host compiler --
- * there is no CE toolchain available in this environment to build/run
- * the real .8xp. Build and run with tests/run_tests.sh.
+ * This file is deliberately free of calculator-specific headers so it
+ * can be compiled and tested with a normal host compiler -- there is no
+ * CE toolchain available in this environment to build/run the real
+ * .8xp. Build and run with tests/run_tests.sh.
+ *
+ * There used to be pixel-unpack tests here too (this file was named
+ * test_decode.c), when src/decode.c bit-packed frames 2-per-byte and
+ * needed a decode step. Frames are now raw, unpacked bytes read straight
+ * off USB into the sprite buffer (see src/player_v2.c) -- there's no
+ * decode step left to test.
  */
-#include "../src/decode.h"
 #include "../src/cin2.h"
 
 #include <stdio.h>
@@ -21,63 +26,6 @@ static int g_failures = 0;
             g_failures++; \
         } \
     } while (0)
-
-/* --- decode tests --------------------------------------------------- */
-
-static void test_decode_known_pattern(void)
-{
-    uint8_t packed[CINEMA_V2_PACKED_BYTES];
-    /* Flat native-resolution output -- decode.c no longer knows about
-     * scaling or framebuffer stride at all (see decode.h); that's
-     * GraphX's job now (gfx_ScaledSprite_NoClip in player_v2.c). A
-     * one-byte guard past the real buffer catches any off-by-one
-     * overrun. */
-    uint8_t out[CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT + 1];
-    uint16_t x, y;
-
-    memset(packed, 0, sizeof(packed));
-    out[sizeof(out) - 1] = 0xAA; /* guard byte */
-
-    /* First byte of frame: left nibble = 0x3, right nibble = 0xC. */
-    packed[0] = 0x3C;
-    /* Last byte of frame (bottom-right pair): left=0x1, right=0x2. */
-    packed[CINEMA_V2_PACKED_BYTES - 1] = 0x12;
-
-    cinema_unpack_packed4(packed, out);
-
-    CHECK(out[0] == 3, "top-left px0");
-    CHECK(out[1] == 12, "top-left px1");
-    CHECK(out[CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT - 2] == 1, "bottom-right px0");
-    CHECK(out[CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT - 1] == 2, "bottom-right px1");
-    CHECK(out[sizeof(out) - 1] == 0xAA, "guard byte untouched (no overrun)");
-
-    /* Every nibble value 0..15 must decode to itself (index-preserving,
-     * no remapping) -- exhaustive over one synthetic frame. */
-    for (y = 0; y < CINEMA_V2_HEIGHT; ++y) {
-        for (x = 0; x < CINEMA_V2_WIDTH / 2; ++x) {
-            uint32_t idx = (uint32_t)y * (CINEMA_V2_WIDTH / 2) + x;
-            uint8_t left = (uint8_t)((x + y) % 16);
-            uint8_t right = (uint8_t)((x + y + 7) % 16);
-            packed[idx] = (uint8_t)((left << 4) | right);
-        }
-    }
-    cinema_unpack_packed4(packed, out);
-    for (y = 0; y < CINEMA_V2_HEIGHT; ++y) {
-        for (x = 0; x < CINEMA_V2_WIDTH / 2; ++x) {
-            uint8_t left = (uint8_t)((x + y) % 16);
-            uint8_t right = (uint8_t)((x + y + 7) % 16);
-            uint32_t dx = ((uint32_t)y * CINEMA_V2_WIDTH) + x * 2;
-            int ok = out[dx + 0] == left && out[dx + 1] == right;
-
-            if (!ok) {
-                printf("FAIL: exhaustive mismatch at x=%u y=%u\n",
-                       (unsigned)x, (unsigned)y);
-                g_failures++;
-                return;
-            }
-        }
-    }
-}
 
 /* --- cin2 header tests ----------------------------------------------- */
 
@@ -217,12 +165,12 @@ static void test_crc32_known_vectors(void)
 
 static void test_frame_count_fits_drive(void)
 {
-    /* header sector + frame_count*15 must be <= drive_sectors */
+    /* header sector + frame_count*CIN2_FRAME_SECTORS must be <= drive_sectors */
     CHECK(cin2_frame_count_fits_drive(0, 1), "zero frames always fits (just the header)");
     CHECK(cin2_frame_count_fits_drive(0, 0) == false, "not even the header sector fits an empty drive");
-    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15), "exact fit is accepted");
-    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15 - 1) == false, "one sector short is rejected");
-    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * 15 + 1), "drive larger than needed is accepted");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * CIN2_FRAME_SECTORS), "exact fit is accepted");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * CIN2_FRAME_SECTORS - 1) == false, "one sector short is rejected");
+    CHECK(cin2_frame_count_fits_drive(10, 1 + 10 * CIN2_FRAME_SECTORS + 1), "drive larger than needed is accepted");
     /* A hostile/corrupt frame_count near UINT32_MAX must not wrap 32-bit
      * math into looking small -- this is exactly the case a 64-bit
      * intermediate is required for. */
@@ -232,7 +180,6 @@ static void test_frame_count_fits_drive(void)
 
 int main(void)
 {
-    test_decode_known_pattern();
     test_header_round_trip();
     test_v1_drive_not_detected_as_v2();
     test_resume_round_trip();

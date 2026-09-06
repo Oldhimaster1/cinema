@@ -3,7 +3,7 @@
  * pointer) and all signatures below are transcribed from
  * https://github.com/CE-Programming/toolchain src/graphx/graphx.h.
  * gfx_vbuffer itself is still used directly by player_v1.c's legacy
- * palette/sprite path; src/player_v2.c and src/decode.c go through
+ * palette/sprite path; src/player_v2.c goes through
  * gfx_ScaledSprite_NoClip() instead (GraphX's own scaler), not
  * gfx_vbuffer, so getting that shape exactly right matters less for v2
  * than it used to. */

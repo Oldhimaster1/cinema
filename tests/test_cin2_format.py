@@ -1,5 +1,5 @@
 """Tests for tools/cin2_format.py -- the Python mirror of src/cin2.c.
-Known-answer CRC vectors here match the ones in tests/test_decode.c so
+Known-answer CRC vectors here match the ones in tests/test_cin2.c so
 both implementations are checked against the same ground truth."""
 import sys
 from pathlib import Path
@@ -62,30 +62,33 @@ def test_v1_drive_not_misdetected():
     assert raw[0:4] != fmt.MAGIC
 
 
-def test_pack_unpack_frame_round_trip():
+def test_encode_decode_frame_round_trip():
     indices = [(x + y) % 16 for y in range(fmt.HEIGHT) for x in range(fmt.WIDTH)]
-    packed = fmt.pack_frame(indices)
-    assert len(packed) == fmt.PACKED_BYTES
-    assert fmt.unpack_frame(packed) == indices
+    encoded = fmt.encode_frame(indices)
+    assert len(encoded) == fmt.FRAME_BYTES
+    assert fmt.decode_frame(encoded) == indices
 
 
-def test_pack_frame_nibble_order():
-    # First pixel pair: left=3, right=12 -> byte 0x3C (see docs/CIN2_FORMAT.md).
+def test_encode_frame_is_one_byte_per_pixel():
+    # No packing at all: byte i is exactly index i (see docs/CIN2_FORMAT.md
+    # -- v2 dropped 4-bit packing since the real cost was the unpack step
+    # this used to require on the calculator, not the extra I/O).
     indices = [3, 12] + [0] * (fmt.WIDTH * fmt.HEIGHT - 2)
-    packed = fmt.pack_frame(indices)
-    assert packed[0] == 0x3C
+    encoded = fmt.encode_frame(indices)
+    assert encoded[0] == 3
+    assert encoded[1] == 12
 
 
-def test_pack_frame_rejects_wrong_length():
+def test_encode_frame_rejects_wrong_length():
     with pytest.raises(ValueError):
-        fmt.pack_frame([0] * 10)
+        fmt.encode_frame([0] * 10)
 
 
-def test_pack_frame_rejects_out_of_range_index():
+def test_encode_frame_rejects_out_of_range_index():
     indices = [0] * (fmt.WIDTH * fmt.HEIGHT)
-    indices[0] = 16  # not representable in 4 bits
+    indices[0] = 16  # only 16 palette entries (0..15) exist
     with pytest.raises(ValueError):
-        fmt.pack_frame(indices)
+        fmt.encode_frame(indices)
 
 
 def test_frame_lba_matches_spec():

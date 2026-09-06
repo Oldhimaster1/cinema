@@ -71,19 +71,19 @@ def test_quantize_frame_resizes_mismatched_input():
     assert len(indices) == fmt.WIDTH * fmt.HEIGHT
 
 
-def test_encoded_frame_round_trips_through_pack_and_decode_math():
+def test_encoded_frame_round_trips_through_encode_and_decode_math():
     """A solid-color frame, quantized against a palette that contains
-    its exact color, should pack/unpack back to a uniform index -- i.e.
-    the whole pipeline (quantize -> pack_frame -> unpack_frame) doesn't
+    its exact color, should encode/decode back to a uniform index -- i.e.
+    the whole pipeline (quantize -> encode_frame -> decode_frame) doesn't
     corrupt or shuffle pixels."""
     frames = [_solid_frame((200, 40, 40)), _solid_frame((40, 200, 40))]
     palette_image = enc.build_global_palette(frames, sample_count=2)
 
     indices = enc.quantize_frame(_solid_frame((200, 40, 40)), palette_image)
-    packed = fmt.pack_frame(indices)
-    unpacked = fmt.unpack_frame(packed)
+    encoded = fmt.encode_frame(indices)
+    decoded = fmt.decode_frame(encoded)
 
-    assert unpacked == indices
+    assert decoded == indices
     # A pure solid-color frame quantized against a palette built from
     # (in part) that exact color should be uniform, not speckled --
     # dithering against a single flat input has nothing to dither.
@@ -121,17 +121,17 @@ def test_full_cli_encode_smoke(tmp_path):
     # by a frame or two at clip boundaries.
     assert 44 <= header.frame_count <= 52
 
-    expected_size = fmt.HEADER_BYTES + header.frame_count * fmt.PACKED_BYTES
+    expected_size = fmt.HEADER_BYTES + header.frame_count * fmt.FRAME_BYTES
     assert len(raw) == expected_size
 
-    # Every frame's bytes must exist and be exactly PACKED_BYTES long --
+    # Every frame's bytes must exist and be exactly FRAME_BYTES long --
     # i.e. frames are laid out back-to-back with no gaps, matching
     # cin2_frame_lba()'s fixed stride.
     for frame_number in range(header.frame_count):
         start = fmt.frame_lba(frame_number) * fmt.SECTOR_BYTES
-        end = start + fmt.PACKED_BYTES
+        end = start + fmt.FRAME_BYTES
         assert end <= len(raw)
-        indices = fmt.unpack_frame(raw[start:end])
+        indices = fmt.decode_frame(raw[start:end])
         assert all(0 <= i <= 15 for i in indices)
 
 

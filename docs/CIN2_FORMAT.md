@@ -19,28 +19,52 @@ what the CE Toolchain documents for tested USB mass-storage throughput
 frame and re-installs the palette every frame.
 
 CIN2 uses one shared 16-color palette for the whole movie (stored once in
-the header) and packs each pixel into 4 bits. A frame is then exactly:
+the header, installed once at startup) instead of resending a palette
+every frame. A frame is then exactly:
 
 ```
-160 * 96 / 2 = 7,680 bytes = 15 sectors
+160 * 96 = 15,360 bytes = 30 sectors
 ```
 
-At 24 fps: `15 * 512 * 24 = 184,320 bytes/s` (~180 KiB/s) -- comfortably
-inside the documented throughput budget, with only one transfer and one
-callback per frame and zero per-frame palette installs.
+one plain byte per pixel (0..15, indexing the shared palette), no
+bit-packing. At 24 fps: `30 * 512 * 24 = 368,640 bytes/s` (~360 KiB/s) --
+above the ~262-273 KiB/s documented throughput budget, so 24fps needs a
+fast drive; at more modest rates (say 15fps, ~225 KiB/s) it's comfortably
+within it. Either way, only one transfer and one callback per frame and
+zero per-frame palette installs, same as before.
+
+An earlier version of CIN2 packed 2 pixels per byte (4 bits each) to
+halve this to 7,680 bytes/frame (15 sectors), trading the shared-palette
+win for actually *less* I/O than the original format at the same frame
+rate. Real-hardware testing found that packing was a net loss: it
+requires unpacking back into one-byte-per-pixel before
+`gfx_ScaledSprite_NoClip` can draw it (GraphX has no packed-4-bit sprite
+format), and that unpack step's CPU cost on the ez80 core -- which has no
+barrel shifter, so even a lookup-table-based unpack still costs a
+non-trivial number of instructions per byte -- outweighed the I/O it
+saved. Comparing against
+[wwierzbowski/cinema](https://github.com/wwierzbowski/cinema) (the
+original, unrelated project this one is a rewrite of) made this obvious
+in hindsight: its player reads frame pixels directly off USB into the
+exact buffer `gfx_ScaledSprite_NoClip` draws from, with no decode step of
+any kind, and reaches 10-11fps despite needing *more* I/O per frame
+(15,872 bytes) than CIN2's packed format ever did (7,680 bytes) --
+proving decode cost, not I/O, was the bottleneck packing never actually
+solved. CIN2 keeps the one real, uncontroversial win (a shared palette
+instead of one per frame) and drops the packing.
 
 ## Drive layout
 
 ```
 LBA 0:            CIN2 header (512 bytes, one sector)
-LBA 1..15:        frame 0, packed 4-bit pixels (7,680 bytes, 15 sectors)
-LBA 16..30:       frame 1
-LBA 31..45:       frame 2
+LBA 1..30:        frame 0, one byte per pixel (15,360 bytes, 30 sectors)
+LBA 31..60:       frame 1
+LBA 61..90:       frame 2
 ...
-LBA 1+15*n .. +14: frame n
+LBA 1+30*n .. +29: frame n
 ```
 
-Frame `n`'s first LBA is `1 + n * 15`. There is no per-frame header,
+Frame `n`'s first LBA is `1 + n * 30`. There is no per-frame header,
 palette, or padding -- frames are back-to-back.
 
 ## Header (LBA 0, 512 bytes)
@@ -73,24 +97,19 @@ now agree with the real header.
 Only the pre-CRC fields (`magic` through `frame_count`, 22 bytes) are
 covered by `header_crc32`. The palette and pixel data are not checksummed
 -- corruption there just looks wrong, it doesn't desync playback, and
-checksumming 180 KiB/s of pixel data on an ez80 core is not worth the
-CPU budget. A reader that gets a bad header CRC must refuse to play
+checksumming hundreds of KiB/s of pixel data on an ez80 core is not worth
+the CPU budget. A reader that gets a bad header CRC must refuse to play
 rather than guess at corrupted `fps_num`/`frame_count`/`width`/`height`
 values, since those drive LBA arithmetic.
 
-## Frame payload (15 sectors = 7,680 bytes)
+## Frame payload (30 sectors = 15,360 bytes)
 
-Each frame is `width * height / 2` bytes of packed 4-bit palette indices,
-row-major, top-to-bottom, left-to-right. Each byte packs two horizontally
-adjacent pixels:
-
-```
-byte = (left_pixel_index << 4) | right_pixel_index
-```
-
-i.e. the high nibble is the even-x pixel, the low nibble is the odd-x
-pixel of the same row. `width` must be even (160 is). There is no
-row padding -- row `y` starts immediately at byte `y * width / 2`.
+Each frame is `width * height` bytes, one plain byte per palette index
+(0..15), row-major, top-to-bottom, left-to-right -- byte `y * width + x`
+is the index for pixel `(x, y)`. Not bit-packed: this is exactly what
+`msd_ReadAsync` deposits straight into the sprite buffer
+`gfx_ScaledSprite_NoClip` draws from (see `src/player_v2.c`), with no
+decode step in between at all. There is no row padding.
 
 ## Resume record (TI AppVar `SSCINEV2`)
 

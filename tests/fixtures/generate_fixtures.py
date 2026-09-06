@@ -57,7 +57,7 @@ def build_movie(frame_count: int, fps_num: int, fps_den: int, palette,
                              fps_den=fps_den, frame_count=frame_count, palette=palette)
     out = bytearray(fmt.build_header(header))
     for f in range(frame_count):
-        out += fmt.pack_frame(frame_fn(f))
+        out += fmt.encode_frame(frame_fn(f))
     return bytes(out)
 
 
@@ -72,13 +72,13 @@ def main() -> None:
     write_good("all_black", build_movie(1, 24, 1, DEFAULT_PALETTE, lambda f: solid_frame(0)),
                True, "single frame, every pixel index 0")
     write_good("all_max_index", build_movie(1, 24, 1, DEFAULT_PALETTE, lambda f: solid_frame(15)),
-               True, "single frame, every pixel index 15 (0xFF packed bytes)")
+               True, "single frame, every pixel index 15 (max palette index, one byte each)")
 
     def alternating_nibbles(_f):
         return [(x % 2) * 15 for _y in range(fmt.HEIGHT) for x in range(fmt.WIDTH)]
     write_good("alternating_nibbles",
                build_movie(1, 24, 1, DEFAULT_PALETTE, alternating_nibbles),
-               True, "index alternates 0,15,0,15... each row -> packed bytes are all 0x0F")
+               True, "index alternates 0,15,0,15... across each row")
 
     def color_bars(_f):
         bar_width = fmt.WIDTH // 16
@@ -106,7 +106,8 @@ def main() -> None:
                True, "exactly 1 frame -- smallest legal movie")
     write_good("four_frame_movie",
                build_movie(4, 24, 1, DEFAULT_PALETTE, lambda f: solid_frame(f)),
-               True, "exactly 4 frames -- matches the player's slot count exactly")
+               True, "exactly 4 frames -- a small multi-frame movie, more frames than "
+                     "the player's current read-ahead slot count")
     write_good("five_frame_movie",
                build_movie(5, 24, 1, DEFAULT_PALETTE, lambda f: solid_frame(f)),
                True, "exactly 5 frames -- first slot-queue refill after prefill")
@@ -154,7 +155,7 @@ def main() -> None:
                              frame_count=4, palette=DEFAULT_PALETTE)
     raw = bytearray(fmt.build_header(header))
     for f in range(4):
-        raw += fmt.pack_frame(solid_frame(f))
+        raw += fmt.encode_frame(solid_frame(f))
     write_bad("zero_width_good_crc", bytes(raw),
               "width=0 with a correct CRC over the corrupted header -- "
               "exercises the dimension check specifically, not the CRC check")
@@ -163,7 +164,7 @@ def main() -> None:
                              frame_count=4, palette=DEFAULT_PALETTE)
     raw = bytearray(fmt.build_header(header))
     for f in range(4):
-        raw += fmt.pack_frame(solid_frame(f))
+        raw += fmt.encode_frame(solid_frame(f))
     write_bad("zero_height_good_crc", bytes(raw), "height=0 with a correct CRC")
 
     header = fmt.Cin2Header(width=320, height=240, fps_num=24, fps_den=1,
@@ -176,14 +177,14 @@ def main() -> None:
                              frame_count=4, palette=DEFAULT_PALETTE)
     raw = bytearray(fmt.build_header(header))
     for f in range(4):
-        raw += fmt.pack_frame(solid_frame(f))
+        raw += fmt.encode_frame(solid_frame(f))
     write_bad("zero_fps_num", bytes(raw), "fps_num=0 with a correct CRC")
 
     header = fmt.Cin2Header(width=fmt.WIDTH, height=fmt.HEIGHT, fps_num=24, fps_den=0,
                              frame_count=4, palette=DEFAULT_PALETTE)
     raw = bytearray(fmt.build_header(header))
     for f in range(4):
-        raw += fmt.pack_frame(solid_frame(f))
+        raw += fmt.encode_frame(solid_frame(f))
     write_bad("zero_fps_den", bytes(raw), "fps_den=0 (would divide by zero in the scheduler)")
 
     header = fmt.Cin2Header(width=fmt.WIDTH, height=fmt.HEIGHT, fps_num=24, fps_den=1,
@@ -214,7 +215,7 @@ def main() -> None:
 
     write_bad("truncated_header", good_raw[:100], "only 100 of 512 header bytes present")
 
-    write_bad("truncated_frame", good_raw[: fmt.HEADER_BYTES + fmt.PACKED_BYTES // 2],
+    write_bad("truncated_frame", good_raw[: fmt.HEADER_BYTES + fmt.FRAME_BYTES // 2],
               "header plus half of frame 0's data; frames 1-3 and the rest of frame 0 missing")
 
     write_bad("trailing_data", good_raw + b"\x00" * 37,

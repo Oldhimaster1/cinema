@@ -75,5 +75,5 @@ def test_duration_boundaries_produce_sane_frame_counts(tmp_path, duration_s, fps
     # File size must match the formula exactly for whatever frame count
     # was actually produced -- this is the invariant that matters, not
     # the exact frame count itself.
-    expected_size = fmt.HEADER_BYTES + header.frame_count * fmt.PACKED_BYTES
+    expected_size = fmt.HEADER_BYTES + header.frame_count * fmt.FRAME_BYTES
     assert out.stat().st_size == expected_size
