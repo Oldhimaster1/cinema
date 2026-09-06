@@ -42,6 +42,13 @@ static uint32_t disk_read_always_fails(void *ctx, uint32_t lba, uint32_t count, 
     return 0;
 }
 
+static uint32_t g_read_calls;
+static uint32_t disk_read_counting(void *ctx, uint32_t lba, uint32_t count, void *buffer)
+{
+    g_read_calls++;
+    return disk_read(ctx, lba, count, buffer);
+}
+
 static void put_u16le(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put_u32le(uint8_t *p, uint32_t v)
 {
@@ -466,6 +473,51 @@ static void test_extent_map_contiguous_file(void)
     CHECK(map.total_sectors == 3u * l.sectors_per_cluster, "total_sectors matches");
 }
 
+static void test_extent_map_reuses_fat_sectors_instead_of_rereading(void)
+{
+    /* Regression test for a real bug found during hardware testing: an
+     * ~11MB file at 4 sectors/cluster needs roughly 5600 cluster-chain
+     * steps, and the extent-map walk used to issue one fresh
+     * read_sectors() call per step even when consecutive steps land in
+     * the SAME 512-byte FAT sector (which holds 128 entries) -- on real
+     * USB mass storage, thousands of redundant single-sector reads took
+     * long enough to look like the player had simply hung after picking
+     * a movie from the file browser. This builds a large (2000-cluster)
+     * contiguous file and checks that the number of device reads stays
+     * close to sector-count-of-the-FAT (which FAT-sector caching should
+     * achieve), not anywhere near cluster-count. */
+    const uint32_t num_clusters = 2000;
+    fs_layout_t l;
+    fat32ro_volume_t vol;
+    fat32ro_extent_map_t map;
+    uint32_t c;
+
+    l.base_lba = 0;
+    l.reserved_sectors = 1;
+    l.sectors_per_cluster = 1;
+    l.num_fats = 1;
+    l.fat_size_sectors = 32; /* 32*512/4 = 4096 entries -- plenty for num_clusters */
+    l.root_cluster = 2;
+    l.total_sectors = l.base_lba + l.reserved_sectors + l.fat_size_sectors + 10 + num_clusters + 10;
+
+    reset_disk();
+    format_disk(&l);
+    for (c = 10; c < 10 + num_clusters - 1; ++c) {
+        set_fat_entry(&l, c, c + 1);
+    }
+    set_fat_entry(&l, 10 + num_clusters - 1, 0x0FFFFFFF);
+
+    CHECK(fat32ro_mount(&vol, disk_read_counting, NULL) == FAT32RO_SUCCESS,
+          "mount for large contiguous file (via the call-counting read_sectors)");
+
+    g_read_calls = 0;
+    CHECK(fat32ro_build_extent_map(&vol, 10, (uint32_t)num_clusters * 512u, &map) == FAT32RO_SUCCESS,
+          "large contiguous file maps successfully");
+    CHECK(map.extent_count == 1, "still collapses to exactly one extent");
+    CHECK(g_read_calls <= l.fat_size_sectors + 5,
+          "FAT sectors are reused across cluster steps, not re-read once per cluster");
+}
+
 static void test_extent_map_fragmented_file(void)
 {
     fs_layout_t l = standard_layout(0);
@@ -664,6 +716,7 @@ int main(void)
     test_list_root_caps_at_max_entries_without_misreporting();
 
     test_extent_map_contiguous_file();
+    test_extent_map_reuses_fat_sectors_instead_of_rereading();
     test_extent_map_fragmented_file();
     test_extent_map_rounds_up_to_cluster_but_not_beyond();
     test_extent_map_zero_length_file();

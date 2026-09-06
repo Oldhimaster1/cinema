@@ -254,6 +254,13 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
 
     *played_ok = false;
 
+    /* Mapping a large/fragmented file's cluster chain can take a
+     * perceptible moment (each still-uncached FAT sector needs its own
+     * device read) -- without this, the browser's selection screen just
+     * sits there unchanged for that whole time, which looks exactly
+     * like the app hung rather than like it's working. */
+    putstr("reading file...");
+
     if (fat32ro_build_extent_map(vol, entry->first_cluster, entry->file_size, movie_map)
         != FAT32RO_SUCCESS) {
         putstr("error mapping file (fragmented or corrupt?)");
