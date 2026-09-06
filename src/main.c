@@ -389,12 +389,13 @@ int main(void)
     memset(&global, 0, sizeof(global_t));
     os_SetCursorPos(1, 0);
 
-    /* The OS runs at a lower power-saving default clock speed; without
-     * this, every CPU-bound part of Cinema (decoding, FAT32 cluster-chain
-     * walking, ...) runs several times slower than it needs to for no
-     * benefit here (playback keeps the screen and USB busy the whole
-     * time regardless). Restored on every exit path below. */
-    boot_Set48MHzMode();
+    /* Deliberately NOT boosting to 48MHz here: usbdrvce.h documents
+     * USB_TRANSFER_BUS_ERROR as most likely caused by running at a
+     * non-default CPU speed, and real-hardware testing confirmed it --
+     * decode got slower, not faster, at 48MHz (consistent with bus-error
+     * overhead eating into the gain rather than a real speedup). Cinema
+     * is USB-bound for its entire runtime, so there's no safe window to
+     * run faster in. */
 
     /* usb initialization loop; waits for something to be plugged in */
     do
@@ -533,7 +534,6 @@ int main(void)
         while (!os_GetCSC());
     }
 
-    boot_Set6MHzMode();
     return 0;
 
 msd_error:
@@ -542,7 +542,6 @@ msd_error:
 
     while (!os_GetCSC());
 
-    boot_Set6MHzMode();
     return 0;
 
 usb_error:
@@ -550,6 +549,5 @@ usb_error:
 
     while (!os_GetCSC());
 
-    boot_Set6MHzMode();
     return 0;
 }

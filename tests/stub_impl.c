@@ -61,8 +61,6 @@ void os_PutStrFull(char *str) { (void)str; }
 void os_NewLine(void) {}
 void os_ClrHome(void) {}
 uint8_t os_GetCSC(void) { return sk_Clear; /* always "exit" so loops terminate */ }
-void boot_Set6MHzMode(void) {}
-void boot_Set48MHzMode(void) {}
 
 void gfx_Begin(void) {}
 void gfx_End(void) {}

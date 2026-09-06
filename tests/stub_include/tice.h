@@ -29,10 +29,4 @@ void os_NewLine(void);
 void os_ClrHome(void);
 uint8_t os_GetCSC(void);
 
-/* Real declarations live in sys/power.h, pulled in transitively by the
- * real tice.h; main.c calls these to run at full CPU speed instead of
- * the OS's power-saving default. */
-void boot_Set6MHzMode(void);
-void boot_Set48MHzMode(void);
-
 #endif
