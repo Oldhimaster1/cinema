@@ -287,16 +287,81 @@ static frame_slot_t *find_failed_slot(player_v2_t *player)
     return NULL;
 }
 
-static bool all_queued_slots_resolved(player_v2_t *player)
+/* Queues frame_number into `slot` and blocks until that one transfer
+ * reaches a terminal state (READY or ERROR), servicing any
+ * SLOT_NEEDS_NEXT_PART continuation along the way -- so at most one
+ * msd_ReadAsync transfer is ever outstanding while this runs. See
+ * serialized_fill_slots for why that matters. context is just for
+ * error messages ("prefill" or "seek"). */
+static bool serialized_fill_slot(player_v2_t *player, frame_slot_t *slot,
+                                   uint32_t frame_number, const char *context)
+{
+    char buffer[40];
+
+    if (queue_frame(player->global, player->movie_map, slot, frame_number) != MSD_SUCCESS) {
+        sprintf(buffer, "error queueing msd (%s)", context);
+        putstr(buffer);
+        return false;
+    }
+
+    for (;;) {
+        if (slot->state == SLOT_READY) {
+            return true;
+        }
+        if (slot->state == SLOT_ERROR) {
+            put_msd_error(slot->error, context);
+            return false;
+        }
+        if (slot->state == SLOT_NEEDS_NEXT_PART) {
+            if (queue_slot_part(player->global, slot) != MSD_SUCCESS) {
+                sprintf(buffer, "error queueing msd (%s)", context);
+                putstr(buffer);
+                return false;
+            }
+        }
+
+        usb_HandleEvents();
+
+        if (player->global->usb == NULL) {
+            putstr("usb device disconnected");
+            return false;
+        }
+        if (os_GetCSC()) {
+            return false;
+        }
+    }
+}
+
+/* Queues every not-yet-read frame that fits in the slots, one at a
+ * time, waiting for each to fully finish (or fail) before starting the
+ * next. Used both for the initial prefill burst and right after a seek
+ * resets all slots -- the two moments where up to SLOT_COUNT fresh
+ * transfers would otherwise get queued back-to-back in a single
+ * refill_empty_slots() pass. Real-hardware testing hit a hard crash
+ * doing exactly that (several msd_ReadAsync calls with no gap between
+ * them); this guarantees at most one transfer is ever outstanding
+ * during these bursts. Steady-state playback (refill_empty_slots
+ * called once per main-loop iteration) is left as it was: it only
+ * rarely needs to queue more than one slot per call, so the same risk
+ * doesn't really apply there. */
+static bool serialized_fill_slots(player_v2_t *player, const char *context)
 {
     uint8_t i;
 
     for (i = 0; i < SLOT_COUNT; ++i) {
-        slot_state_t state = player->slots[i].state;
+        frame_slot_t *slot = &player->slots[i];
 
-        if (state == SLOT_LOADING || state == SLOT_NEEDS_NEXT_PART) {
+        if (slot->state == SLOT_ERROR) {
+            continue; /* left for the main loop to observe/report */
+        }
+        if (player->next_frame_to_queue >= player->frame_count) {
+            break;
+        }
+
+        if (!serialized_fill_slot(player, slot, player->next_frame_to_queue, context)) {
             return false;
         }
+        player->next_frame_to_queue++;
     }
 
     return true;
@@ -307,38 +372,7 @@ static bool all_queued_slots_resolved(player_v2_t *player)
  * frame the original player waited for. */
 static bool prefill_frames(player_v2_t *player)
 {
-    if (!refill_empty_slots(player)) {
-        putstr("error queueing msd (prefill)");
-        return false;
-    }
-
-    while (!all_queued_slots_resolved(player)) {
-        usb_HandleEvents();
-
-        if (player->global->usb == NULL) {
-            putstr("usb device disconnected");
-            return false;
-        }
-        {
-            frame_slot_t *failed = find_failed_slot(player);
-            if (failed != NULL) {
-                put_msd_error(failed->error, "prefill");
-                return false;
-            }
-        }
-        /* A slot that just finished one part of a multi-part
-         * (fragmented-file) frame is sitting in SLOT_NEEDS_NEXT_PART --
-         * without this, it would never progress during prefill. */
-        if (!refill_empty_slots(player)) {
-            putstr("error queueing msd (prefill)");
-            return false;
-        }
-        if (os_GetCSC()) {
-            return false;
-        }
-    }
-
-    return true;
+    return serialized_fill_slots(player, "prefill");
 }
 
 /* Frames that finished loading but are older than what the clock now
@@ -554,12 +588,16 @@ static void drain_loading_slots(player_v2_t *player)
     }
 }
 
-static void player_seek_to_frame(player_v2_t *player, uint32_t target)
+/* Returns false only on a fatal I/O error/disconnect while refilling
+ * the slots the seek just invalidated (mirroring prefill_frames' fatal
+ * error handling) -- player_v2_loop treats that exactly like any other
+ * fatal error and stops. */
+static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
 {
     uint8_t i;
 
     if (player->frame_count == 0) {
-        return;
+        return true;
     }
     if (target >= player->frame_count) {
         target = player->frame_count - 1;
@@ -601,9 +639,16 @@ static void player_seek_to_frame(player_v2_t *player, uint32_t target)
 
     player->fps_window_frames = 0;
     player->fps_window_start = player->start_tick;
+
+    /* Every slot just got reset to EMPTY above -- refilling all of them
+     * one at a time (rather than leaving it to the main loop's usual
+     * one-pass refill_empty_slots() call) avoids the same back-to-back
+     * multi-transfer burst that prefill_frames now avoids. See
+     * serialized_fill_slots. */
+    return serialized_fill_slots(player, "seek");
 }
 
-static void player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
+static bool player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
 {
     uint32_t magnitude = (uint32_t)(delta_seconds < 0
         ? -(int32_t)delta_seconds : delta_seconds);
@@ -612,11 +657,11 @@ static void player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
     uint32_t base = player->has_presented ? player->last_frame_presented : 0;
 
     if (delta_seconds < 0) {
-        player_seek_to_frame(player, delta_frames >= base ? 0 : base - delta_frames);
+        return player_seek_to_frame(player, delta_frames >= base ? 0 : base - delta_frames);
     } else {
         uint64_t target = (uint64_t)base + delta_frames;
 
-        player_seek_to_frame(player, target >= player->frame_count
+        return player_seek_to_frame(player, target >= player->frame_count
             ? player->frame_count - 1 : (uint32_t)target);
     }
 }
@@ -777,20 +822,30 @@ static bool player_v2_loop(player_v2_t *player)
                 break;
 
             case sk_Left:
-                player_seek_seconds(player, -V2_SEEK_SMALL);
+                if (!player_seek_seconds(player, -V2_SEEK_SMALL)) {
+                    return false;
+                }
                 break;
             case sk_Right:
-                player_seek_seconds(player, V2_SEEK_SMALL);
+                if (!player_seek_seconds(player, V2_SEEK_SMALL)) {
+                    return false;
+                }
                 break;
             case sk_Down:
-                player_seek_seconds(player, -V2_SEEK_LARGE);
+                if (!player_seek_seconds(player, -V2_SEEK_LARGE)) {
+                    return false;
+                }
                 break;
             case sk_Up:
-                player_seek_seconds(player, V2_SEEK_LARGE);
+                if (!player_seek_seconds(player, V2_SEEK_LARGE)) {
+                    return false;
+                }
                 break;
 
             case sk_0:
-                player_seek_to_frame(player, 0);
+                if (!player_seek_to_frame(player, 0)) {
+                    return false;
+                }
                 break;
 
             case sk_Mode:
