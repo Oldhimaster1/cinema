@@ -840,6 +840,21 @@ static bool player_v2_loop(player_v2_t *player)
     }
 }
 
+/* TEMPORARY: pauses for ~2 real seconds on hardware so a diagnostic
+ * putstr() actually gets seen before the next step runs, without
+ * relying on os_GetCSC() (which the host simulation tests never
+ * schedule a key for at these new call sites, and would otherwise hang
+ * forever). Remove alongside the checkpoints in player_v2_run once the
+ * crash under investigation is fixed. */
+static void checkpoint_pause(void)
+{
+    clock_t start = clock();
+
+    while ((clock_t)(clock() - start) < (clock_t)(2 * CLOCKS_PER_SEC)) {
+        usb_HandleEvents();
+    }
+}
+
 bool player_v2_run(global_t *global, const cin2_header_t *header,
                     uint32_t start_frame, const fat32ro_extent_map_t *movie_map,
                     const char *filename)
@@ -872,18 +887,33 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.next_frame_to_queue = start_frame;
     choose_osd_colors(&player, header);
 
-    gfx_Begin();
-    graphics_active = true;
-    gfx_SetPalette(header->palette, sizeof(header->palette), 0);
-    gfx_SwapDraw();
-    gfx_SetDrawBuffer();
-    gfx_ZeroScreen();
-    gfx_SwapDraw();
-    gfx_SetDrawBuffer();
-    gfx_ZeroScreen();
+    /* TEMPORARY diagnostic checkpoints (see the crash investigation in
+     * the project history): prefill runs here, before gfx_Begin(), so a
+     * fault in the FAT32-aware read-queueing path shows as a readable
+     * text-mode message rather than being swallowed by a graphics-mode
+     * crash with nothing left on screen to report. A clock()-based pause
+     * (not os_GetCSC()) so this stays exercisable by the host simulation
+     * tests, which don't inject a key at these new call sites. Remove
+     * once the real hardware crash is root-caused and fixed. */
+    putstr("checkpoint: prefilling...");
+    checkpoint_pause();
 
     ok = prefill_frames(&player);
+
+    putstr(ok ? "checkpoint: prefill ok" : "checkpoint: prefill FAILED");
+    checkpoint_pause();
+
     if (ok) {
+        gfx_Begin();
+        graphics_active = true;
+        gfx_SetPalette(header->palette, sizeof(header->palette), 0);
+        gfx_SwapDraw();
+        gfx_SetDrawBuffer();
+        gfx_ZeroScreen();
+        gfx_SwapDraw();
+        gfx_SetDrawBuffer();
+        gfx_ZeroScreen();
+
         player.start_tick = clock();
         player.fps_window_start = player.start_tick;
         /* Surface the controls/scrubber briefly on start, the way a
