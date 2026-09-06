@@ -119,7 +119,9 @@ msd_error_t msd_WriteAsync(msd_transfer_t *xfer) { (void)xfer; return MSD_SUCCES
 
 /* --- fileioc stub: in-memory appvar store ----------------------------- */
 
-static uint8_t g_appvar_data[256];
+/* Sized for CIN2_RESUME_STORE_BYTES (33 * 8 = 264), the largest thing
+ * this stub ever needs to hold. */
+static uint8_t g_appvar_data[512];
 static size_t g_appvar_len = 0;
 static int g_appvar_exists = 0;
 static size_t g_appvar_pos = 0;

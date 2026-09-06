@@ -113,8 +113,13 @@ decode step in between at all. There is no row padding.
 
 ## Resume record (TI AppVar `SSCINEV2`)
 
-Written on exit, read on the "resume?" prompt. 33 bytes, all
-little-endian:
+The appvar holds `CIN2_RESUME_SLOT_COUNT` (8) of these records
+back-to-back (264 bytes total), so up to 8 different movies on a drive
+each keep their own resume position instead of only the most recently
+watched one sharing a single slot. Each slot is independently
+CRC-validated; an empty or corrupted slot just reads as "no resume
+here". Written (read-modify-write over the whole store) on exit, read
+on the "resume?" prompt. Each record is 33 bytes, all little-endian:
 
 | Offset | Size | Field                  |
 |-------:|-----:|-------------------------|

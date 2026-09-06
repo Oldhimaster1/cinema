@@ -38,6 +38,13 @@
 /* How long the OSD stays up after a control press before auto-hiding. */
 #define V2_OSD_LINGER_TICKS (3UL * CLOCKS_PER_SEC)
 
+/* How long the wanted frame can go unavailable before showing
+ * "Buffering...": long enough that ordinary frame-to-frame jitter never
+ * triggers it, short enough that a genuine USB-throughput stall (see
+ * README's Performance section) is reported quickly rather than just
+ * looking like a frozen picture. */
+#define V2_BUFFERING_THRESHOLD_TICKS (CLOCKS_PER_SEC / 2)
+
 /* Seek step sizes, in seconds of movie time. */
 #define V2_SEEK_SMALL 10
 #define V2_SEEK_LARGE 60
@@ -120,9 +127,14 @@ typedef struct {
     clock_t pause_tick;
     clock_t accumulated_pause_ticks;
     bool paused;
+    bool loop_enabled;       /* toggled with [graph]; restarts from frame 0 at the end instead of stopping */
 
     uint32_t dropped_frames;
     uint32_t repeated_frames;
+
+    /* --- stall / buffering feedback --- */
+    clock_t last_progress_tick; /* clock() as of the last frame actually shown */
+    bool buffering_shown;       /* is the "Buffering..." overlay currently up? */
 
     /* --- OSD / controls --- */
     bool osd_pinned;          /* toggled on with [mode], stays until toggled off */
@@ -561,24 +573,47 @@ static void draw_osd(player_v2_t *player)
     format_timecode(total, player->frame_count, player->fps_num, player->fps_den);
 
     if (player->paused) {
-        sprintf(line, "PAUSED  %s/%s", position, total);
+        sprintf(line, "PAUSED  %s/%s%s", position, total,
+                player->loop_enabled ? "  LOOP" : "");
     } else {
         uint32_t decode_ms = player->decode_samples
             ? (uint32_t)(((uint64_t)player->decode_ticks_total * 1000u)
                           / ((uint64_t)player->decode_samples * CLOCKS_PER_SEC))
             : 0u;
 
-        sprintf(line, "%s/%s  %lu.%luFPS  DEC%lums  DR%lu",
+        sprintf(line, "%s/%s  %lu.%luFPS  DEC%lums  DR%lu%s",
                 position, total,
                 (unsigned long)(player->fps_tenths / 10u),
                 (unsigned long)(player->fps_tenths % 10u),
                 (unsigned long)decode_ms,
-                (unsigned long)player->dropped_frames);
+                (unsigned long)player->dropped_frames,
+                player->loop_enabled ? "  LOOP" : "");
     }
 
     gfx_SetTextFGColor(player->osd_fg);
     gfx_SetTextBGColor(player->osd_bg);
     gfx_PrintStringXY(line, 4, V2_OSD_TEXT_Y);
+}
+
+/* Draws "Buffering..." straight onto the visible screen, the same
+ * gfx_SetDrawScreen()/gfx_SetDrawBuffer() trick the paused-OSD path
+ * uses: there's no freshly rendered frame to swap in while stalled (by
+ * definition -- that's what "stalled" means here), so this has to paint
+ * over whatever's already showing rather than going through the normal
+ * offscreen-buffer-then-swap pipeline. Called only when the wanted
+ * frame has been unavailable past V2_BUFFERING_THRESHOLD_TICKS -- see
+ * player_v2_loop. Clearing it back out when a frame becomes ready again
+ * is handled by forcing osd_clear_pending, reusing the exact mechanism
+ * render_frame() already uses to scrub the OSD out of both swap
+ * buffers. */
+static void show_buffering_overlay(player_v2_t *player)
+{
+    gfx_SetDrawScreen();
+    osd_fill_rect(0, V2_OSD_TOP, GFX_LCD_WIDTH, V2_OSD_ROWS, player->osd_bg);
+    gfx_SetTextFGColor(player->osd_fg);
+    gfx_SetTextBGColor(player->osd_bg);
+    gfx_PrintStringXY("Buffering...", 4, V2_OSD_TEXT_Y);
+    gfx_SetDrawBuffer();
 }
 
 /* Waits until no slot has a transfer in flight. Required before reusing
@@ -638,6 +673,7 @@ static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
     player->next_frame_to_queue = target;
     player->start_frame = target;
     player->start_tick = clock();
+    player->last_progress_tick = player->start_tick;
     player->accumulated_pause_ticks = 0;
     /* A seek always resumes playback (standard player behavior, and it
      * sidesteps a real gap otherwise: the paused path only repaints via
@@ -767,24 +803,41 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
 static void save_resume_state(const player_v2_t *player)
 {
     uint8_t var;
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t state;
+    int slot;
 
     if (!player->has_presented) {
         return;
     }
 
+    /* Read-modify-write: ti_Write always rewrites the whole appvar, and
+     * the store holds several movies' resume records side by side (see
+     * cin2.h), so writing this one must not clobber the others. A
+     * missing appvar (first run ever) or one shorter than the current
+     * store size (an older single-slot build's leftover 33-byte appvar)
+     * both leave `store` all-zero, which cin2_resume_store_find/
+     * slot_for already treat as "no resume recorded yet" -- so an
+     * upgrade from the old format just quietly starts a fresh store
+     * rather than misreading it. */
+    memset(store, 0, sizeof(store));
+    var = ti_Open(APPVAR_V2, "r");
+    if (var) {
+        ti_Read(store, 1, sizeof(store), var);
+        ti_Close(var);
+    }
+
+    state.frame_count = player->frame_count;
+    state.last_presented_frame = player->last_frame_presented;
+    memcpy(state.filename, player->filename, sizeof(state.filename));
+    slot = cin2_resume_store_slot_for(store, player->filename);
+    cin2_resume_store_write_slot(store, slot, &state);
+
     var = ti_Open(APPVAR_V2, "w");
     if (var) {
-        uint8_t raw[CIN2_RESUME_BYTES];
-        cin2_resume_t state;
-
-        state.frame_count = player->frame_count;
-        state.last_presented_frame = player->last_frame_presented;
-        memcpy(state.filename, player->filename, sizeof(state.filename));
-        cin2_build_resume_record(raw, &state);
-
         ti_SetGCBehavior(NULL, NULL);
         ti_SetArchiveStatus(0, var);
-        ti_Write(raw, 1, CIN2_RESUME_BYTES, var);
+        ti_Write(store, 1, sizeof(store), var);
         ti_SetArchiveStatus(1, var);
         ti_Close(var);
     }
@@ -916,6 +969,10 @@ static bool player_v2_loop(player_v2_t *player)
                 }
                 break;
 
+            case sk_Graph:
+                player->loop_enabled = !player->loop_enabled;
+                break;
+
             default:
                 break;
         }
@@ -949,19 +1006,49 @@ static bool player_v2_loop(player_v2_t *player)
             slot = find_ready_frame(player, wanted);
 
             if (slot != NULL) {
+                if (player->buffering_shown) {
+                    /* Stall resolved -- scrub the stale "Buffering..."
+                     * text out of both swap buffers via the same
+                     * mechanism render_frame()'s own OSD logic uses (see
+                     * its showing/osd_was_visible handling). Whichever
+                     * path fires next call (a real OSD redraw, or the
+                     * clear-only fill) repaints the whole letterbox rect
+                     * regardless, so this is safe either way. */
+                    player->buffering_shown = false;
+                    player->osd_clear_pending = 2;
+                }
+
                 render_frame(player, slot);
                 player->has_presented = true;
                 player->last_frame_presented = slot->frame_number;
+                player->last_progress_tick = clock();
                 slot->state = SLOT_EMPTY;
 
                 if (playback_finished(player)) {
-                    return true;
+                    if (!player->loop_enabled) {
+                        return true;
+                    }
+                    /* player_seek_to_frame(..., 0) is exactly the same
+                     * reset the [0] restart key uses -- slots, timing,
+                     * and the "already shown" marker all go back to a
+                     * fresh start, so looping is indistinguishable from
+                     * the user pressing 0 right as the last frame ends. */
+                    if (!player_seek_to_frame(player, 0)) {
+                        return false;
+                    }
                 }
             } else if (player->has_presented
                        && wanted > player->last_frame_presented) {
                 /* Wanted frame isn't ready yet -- hold the currently
                  * displayed frame rather than show nothing. */
                 player->repeated_frames++;
+
+                if (!player->buffering_shown
+                    && (clock_t)(clock() - player->last_progress_tick)
+                           > (clock_t)V2_BUFFERING_THRESHOLD_TICKS) {
+                    show_buffering_overlay(player);
+                    player->buffering_shown = true;
+                }
             }
         }
     }

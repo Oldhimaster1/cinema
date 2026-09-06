@@ -164,3 +164,45 @@ bool cin2_parse_resume_record(const uint8_t *raw, cin2_resume_t *out)
 
     return true;
 }
+
+int cin2_resume_store_find(const uint8_t *raw, const char *filename, cin2_resume_t *out)
+{
+    int i;
+
+    for (i = 0; i < CIN2_RESUME_SLOT_COUNT; ++i) {
+        cin2_resume_t candidate;
+
+        if (cin2_parse_resume_record(raw + (size_t)i * CIN2_RESUME_BYTES, &candidate)
+            && strcmp(candidate.filename, filename) == 0) {
+            *out = candidate;
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+int cin2_resume_store_slot_for(const uint8_t *raw, const char *filename)
+{
+    int first_invalid = -1;
+    int i;
+
+    for (i = 0; i < CIN2_RESUME_SLOT_COUNT; ++i) {
+        cin2_resume_t candidate;
+        bool valid = cin2_parse_resume_record(raw + (size_t)i * CIN2_RESUME_BYTES, &candidate);
+
+        if (valid && strcmp(candidate.filename, filename) == 0) {
+            return i;
+        }
+        if (!valid && first_invalid < 0) {
+            first_invalid = i;
+        }
+    }
+
+    return first_invalid >= 0 ? first_invalid : 0;
+}
+
+void cin2_resume_store_write_slot(uint8_t *raw, int slot, const cin2_resume_t *state)
+{
+    cin2_build_resume_record(raw + (size_t)slot * CIN2_RESUME_BYTES, state);
+}

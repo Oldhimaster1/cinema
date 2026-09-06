@@ -90,4 +90,40 @@ void cin2_build_resume_record(uint8_t *raw, const cin2_resume_t *state);
 /* Returns true and fills *out if raw is a valid v2 resume record. */
 bool cin2_parse_resume_record(const uint8_t *raw, cin2_resume_t *out);
 
+/* Multi-slot resume store: CIN2_RESUME_SLOT_COUNT independent resume
+ * records back-to-back in one CIN2_RESUME_STORE_BYTES appvar, so more
+ * than one movie's resume position can be remembered at once (a FAT32
+ * drive can hold several -- see docs/CIN2_FORMAT.md). Each slot is
+ * validated independently via cin2_parse_resume_record, so a slot
+ * that's never been written (all zero) or corrupted just reads as "no
+ * resume here" -- no separate "is this slot in use" flag needed. */
+#define CIN2_RESUME_SLOT_COUNT  8
+#define CIN2_RESUME_STORE_BYTES (CIN2_RESUME_BYTES * CIN2_RESUME_SLOT_COUNT)
+
+/* Searches a CIN2_RESUME_STORE_BYTES-long store for a valid slot whose
+ * filename matches. Returns the slot index (0..CIN2_RESUME_SLOT_COUNT-1)
+ * and fills *out, or -1 if none matches -- including when raw is an
+ * all-zero/freshly-created store, or garbage from an older single-slot
+ * build (see cin2_resume_store_slot_for), which correctly find nothing
+ * rather than misreading it. Matching is by filename alone; the caller
+ * (which has the movie's current header) still must check
+ * frame_count/last_presented_frame itself, same as the original
+ * single-slot design always did. */
+int cin2_resume_store_find(const uint8_t *raw, const char *filename, cin2_resume_t *out);
+
+/* Picks which slot a new resume record for filename should be written
+ * into: reuses the slot already holding a record for this exact
+ * filename if one exists (so re-watching the same movie updates its own
+ * slot instead of spawning a duplicate), else the first slot that fails
+ * to parse (empty or corrupt), else slot 0. There's no recency
+ * tracking, so once all CIN2_RESUME_SLOT_COUNT slots are genuinely in
+ * use by that many different movies, the oldest-index slot is simply
+ * reused next -- not true LRU, just a bound on how much resume history
+ * is kept. */
+int cin2_resume_store_slot_for(const uint8_t *raw, const char *filename);
+
+/* Writes state into slot `slot` (0..CIN2_RESUME_SLOT_COUNT-1) of the
+ * CIN2_RESUME_STORE_BYTES-long raw buffer, in place. */
+void cin2_resume_store_write_slot(uint8_t *raw, int slot, const cin2_resume_t *state);
+
 #endif

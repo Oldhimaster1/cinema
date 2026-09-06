@@ -119,8 +119,11 @@ static bool has_playable_extension(const char *name)
 
 /* Simple scrolling text list: Up/Down to move, Enter or 2nd to select,
  * Clear to back out. Returns the selected index, or -1 if the user
- * backed out. */
-static int run_file_browser(const fat32ro_dirent_t *entries, int count)
+ * backed out. durations[i] is an optional "M:SS" string appended after
+ * entries[i].name (empty if that file's duration couldn't be read --
+ * see probe_durations), or NULL to skip showing durations entirely. */
+static int run_file_browser(const fat32ro_dirent_t *entries, int count,
+                             const char (*durations)[8])
 {
     int selected = 0;
     int top = 0;
@@ -132,9 +135,14 @@ static int run_file_browser(const fat32ro_dirent_t *entries, int count)
         os_ClrHome();
         putstr("Select a movie (Clear to exit)");
         for (i = top; i < count && i < top + BROWSER_VISIBLE_ROWS; ++i) {
-            char line[FAT32RO_MAX_NAME + 1];
+            char line[FAT32RO_MAX_NAME + 12];
 
-            sprintf(line, "%c%s", (i == selected) ? '>' : ' ', entries[i].name);
+            if (durations != NULL && durations[i][0] != '\0') {
+                sprintf(line, "%c%s %s", (i == selected) ? '>' : ' ',
+                        entries[i].name, durations[i]);
+            } else {
+                sprintf(line, "%c%s", (i == selected) ? '>' : ' ', entries[i].name);
+            }
             putstr(line);
         }
 
@@ -208,14 +216,19 @@ static uint32_t v2_resume_menu(const cin2_header_t *header, const char *filename
     cin2_resume_t resume;
     bool have_resume = false;
 
-    var = ti_Open(APPVAR_V2, "r+");
+    var = ti_Open(APPVAR_V2, "r");
     if (var) {
-        uint8_t raw[CIN2_RESUME_BYTES];
+        uint8_t store[CIN2_RESUME_STORE_BYTES];
 
-        if (ti_Read(raw, 1, CIN2_RESUME_BYTES, var) == CIN2_RESUME_BYTES
-            && cin2_parse_resume_record(raw, &resume)
+        /* A short read (including 0, if the appvar doesn't exist, or a
+         * leftover 33-byte single-slot appvar from an older build) just
+         * means "no matching resume record" -- cin2_resume_store_find
+         * only ever looks inside a full CIN2_RESUME_STORE_BYTES buffer,
+         * so an exact-length check here is what keeps a too-short read
+         * from being scanned as if it were valid store data. */
+        if (ti_Read(store, 1, sizeof(store), var) == sizeof(store)
+            && cin2_resume_store_find(store, filename, &resume) >= 0
             && resume.frame_count == header->frame_count
-            && strcmp(resume.filename, filename) == 0
             && resume.last_presented_frame + 1 < header->frame_count) {
             have_resume = true;
         }
@@ -240,6 +253,94 @@ static uint32_t v2_resume_menu(const cin2_header_t *header, const char *filename
     }
 }
 
+/* Maps entry's cluster chain and reads/validates its CIN2 header in one
+ * step -- shared by play_fat_file (which then plays it) and
+ * probe_durations (which only wants frame_count/fps to compute a
+ * duration string). Returns NULL and fills *out_header on success, or a
+ * static, caller-printable error message on failure -- *out_map is
+ * still built even on a header-validation failure (only
+ * fat32ro_build_extent_map itself failing leaves it unbuilt), since a
+ * caller that already checked for NULL has no reason to inspect it
+ * either way. */
+static const char *read_cin2_header_for_entry(global_t *global, const fat32ro_volume_t *vol,
+                                                const fat32ro_dirent_t *entry,
+                                                uint8_t *header_sector_buf,
+                                                fat32ro_extent_map_t *out_map,
+                                                cin2_header_t *out_header)
+{
+    uint32_t header_lba, header_run;
+
+    if (fat32ro_build_extent_map(vol, entry->first_cluster, entry->file_size, out_map)
+        != FAT32RO_SUCCESS) {
+        return "error mapping file (fragmented or corrupt?)";
+    }
+    if (!fat32ro_extent_lookup(out_map, 0, &header_lba, &header_run)
+        || msd_Read(&global->msd, header_lba, 1, header_sector_buf) != 1) {
+        return "error reading movie header";
+    }
+    if (!cin2_has_magic(header_sector_buf) || !cin2_parse_header(header_sector_buf, out_header)) {
+        return "not a valid CIN2 file";
+    }
+
+    return NULL;
+}
+
+/* "M:SS" (or "H:MM:SS" for anything an hour or longer) for the browser
+ * list -- deliberately not shared with player_v2.c's own
+ * format_timecode: that one always formats a *frame number* against a
+ * movie's own fps, this one only ever needs a whole movie's total
+ * duration, and duplicating three lines here isn't worth a shared
+ * header just for that. */
+static void format_duration(char *out, uint32_t frame_count, uint32_t fps_num, uint32_t fps_den)
+{
+    uint32_t seconds = (uint32_t)(((uint64_t)frame_count * fps_den) / fps_num);
+    uint32_t hours = seconds / 3600u;
+
+    if (hours > 0) {
+        sprintf(out, "%lu:%02lu:%02lu", (unsigned long)hours,
+                (unsigned long)((seconds / 60u) % 60u), (unsigned long)(seconds % 60u));
+    } else {
+        sprintf(out, "%lu:%02lu", (unsigned long)(seconds / 60u), (unsigned long)(seconds % 60u));
+    }
+}
+
+/* Probes every playable file's header (one sector each) to fill in a
+ * "M:SS" duration string per entry, shown alongside the name in the
+ * browser. durations[i][0] is left '\0' for anything unreadable/invalid
+ * -- the browser just shows the bare name for those, same as before this
+ * existed, rather than treating it as an error this early (the file
+ * might still be perfectly playable once actually selected, or might
+ * not -- either way play_fat_file is what decides that). Reuses
+ * header_sector/scratch_map (the same scratch buffers play_fat_file
+ * uses for whichever file ends up actually selected) since nothing else
+ * needs them until then. */
+static void probe_durations(global_t *global, const fat32ro_volume_t *vol,
+                              const fat32ro_dirent_t *playable, int playable_count,
+                              uint8_t *header_sector, fat32ro_extent_map_t *scratch_map,
+                              char durations[][8])
+{
+    int i;
+
+    if (playable_count > 1) {
+        /* A single file is about to get re-mapped anyway the instant
+         * it's chosen (there's no browser wait for a 1-file list to
+         * matter), so only bother with the loading message when there's
+         * an actual list to sit and look at. */
+        putstr("scanning movies...");
+    }
+
+    for (i = 0; i < playable_count; ++i) {
+        cin2_header_t header;
+
+        durations[i][0] = '\0';
+        if (read_cin2_header_for_entry(global, vol, &playable[i], header_sector,
+                                         scratch_map, &header) == NULL
+            && header.width == CINEMA_V2_WIDTH && header.height == CINEMA_V2_HEIGHT) {
+            format_duration(durations[i], header.frame_count, header.fps_num, header.fps_den);
+        }
+    }
+}
+
 /* Validates and plays header_sector/entry's file. Always returns true
  * (the caller already knows this is a FAT32 drive at this point, so
  * there's no "fall back to raw mode" case left) -- *played_ok reports
@@ -249,7 +350,6 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
                            fat32ro_extent_map_t *movie_map, bool *played_ok)
 {
     cin2_header_t header;
-    uint32_t header_lba, header_run;
 
     *played_ok = false;
 
@@ -260,26 +360,23 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
      * like the app hung rather than like it's working. */
     putstr("reading file...");
 
-    if (fat32ro_build_extent_map(vol, entry->first_cluster, entry->file_size, movie_map)
-        != FAT32RO_SUCCESS) {
-        putstr("error mapping file (fragmented or corrupt?)");
-        return;
-    }
-    if (!fat32ro_extent_lookup(movie_map, 0, &header_lba, &header_run)
-        || msd_Read(&global->msd, header_lba, 1, header_sector) != 1) {
-        putstr("error reading movie header");
-        return;
-    }
-    if (!cin2_has_magic(header_sector) || !cin2_parse_header(header_sector, &header)) {
-        putstr("not a valid CIN2 file");
-        return;
+    {
+        const char *err = read_cin2_header_for_entry(global, vol, entry, header_sector,
+                                                        movie_map, &header);
+        if (err != NULL) {
+            putstr(err);
+            pause_for_key();
+            return;
+        }
     }
     if (header.width != CINEMA_V2_WIDTH || header.height != CINEMA_V2_HEIGHT) {
         putstr("unsupported CIN2 resolution");
+        pause_for_key();
         return;
     }
     if (!cin2_frame_count_fits_drive(header.frame_count, movie_map->total_sectors)) {
         putstr("movie extends beyond the file's actual size");
+        pause_for_key();
         return;
     }
 
@@ -311,8 +408,9 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
     static fat32ro_dirent_t entries[BROWSER_MAX_FILES];
     static fat32ro_dirent_t playable[BROWSER_MAX_FILES];
     static fat32ro_extent_map_t movie_map;
+    static char durations[BROWSER_MAX_FILES][8];
     fat32ro_error_t mount_err;
-    int total_count, playable_count, i, choice;
+    int total_count, playable_count, i;
 
     mount_err = fat32ro_mount(&vol, fat_read_adapter, global);
     if (mount_err == FAT32RO_ERROR_NOT_FAT32) {
@@ -362,14 +460,33 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
         return true;
     }
 
-    choice = run_file_browser(playable, playable_count);
-    if (choice < 0) {
-        *played_ok = true; /* user chose to back out; not an error */
-        return true;
-    }
+    probe_durations(global, &vol, playable, playable_count, header_sector, &movie_map, durations);
 
-    play_fat_file(global, &vol, &playable[choice], header_sector, &movie_map, played_ok);
-    return true;
+    /* Loops back to the browser after a movie ends, is exited early
+     * (Clear during playback), or fails to load/play -- only backing
+     * out of the browser itself (Clear there) or the drive genuinely
+     * going away actually leaves this function. A FAT32 drive can hold
+     * several movies (that's the whole point of this browser), so
+     * having to relaunch Cinema just to watch a second one would be a
+     * real gap. */
+    *played_ok = true;
+    for (;;) {
+        int choice = run_file_browser(playable, playable_count, durations);
+
+        if (choice < 0) {
+            return true; /* user backed out of the browser -- exit Cinema */
+        }
+
+        play_fat_file(global, &vol, &playable[choice], header_sector, &movie_map, played_ok);
+
+        if (global->usb == NULL) {
+            /* Drive is gone -- nothing left to browse. *played_ok
+             * already reflects however play_fat_file/player_v2_run
+             * left it (false, in practice: a real disconnect is always
+             * reported as a failure). */
+            return true;
+        }
+    }
 }
 
 int main(void)

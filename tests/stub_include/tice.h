@@ -22,6 +22,7 @@
 #define sk_2nd     0x36
 #define sk_Mode    0x37
 #define sk_Del     0x38
+#define sk_Graph   0x31
 
 void os_SetCursorPos(uint8_t row, uint8_t col);
 void os_PutStrFull(char *str);

@@ -146,3 +146,71 @@ def test_resume_record_rejects_corruption():
         corrupt[i] ^= 0xFF
         with pytest.raises(ValueError):
             fmt.parse_resume_record(bytes(corrupt))
+
+
+def test_resume_store_empty_store_finds_nothing():
+    store = bytes(fmt.RESUME_STORE_BYTES)
+    assert fmt.resume_store_find(store, "MOVIE.BIN") is None
+
+
+def test_resume_store_write_then_find():
+    store = bytearray(fmt.RESUME_STORE_BYTES)
+    record = fmt.ResumeRecord(frame_count=500, last_presented_frame=42, filename="MOVIE1.BIN")
+
+    slot = fmt.resume_store_slot_for(store, record.filename)
+    assert slot == 0
+    fmt.resume_store_write_slot(store, slot, record)
+
+    found = fmt.resume_store_find(store, "MOVIE1.BIN")
+    assert found is not None
+    assert found[0] == slot
+    assert found[1].frame_count == record.frame_count
+    assert found[1].last_presented_frame == record.last_presented_frame
+    assert fmt.resume_store_find(store, "OTHER.BIN") is None
+
+
+def test_resume_store_multiple_movies_coexist():
+    store = bytearray(fmt.RESUME_STORE_BYTES)
+    a = fmt.ResumeRecord(frame_count=100, last_presented_frame=10, filename="A.BIN")
+    b = fmt.ResumeRecord(frame_count=200, last_presented_frame=20, filename="B.BIN")
+
+    slot_a = fmt.resume_store_slot_for(store, a.filename)
+    fmt.resume_store_write_slot(store, slot_a, a)
+    slot_b = fmt.resume_store_slot_for(store, b.filename)
+    assert slot_b != slot_a
+    fmt.resume_store_write_slot(store, slot_b, b)
+
+    found_a = fmt.resume_store_find(store, "A.BIN")
+    found_b = fmt.resume_store_find(store, "B.BIN")
+    assert found_a == (slot_a, a)
+    assert found_b == (slot_b, b)
+
+
+def test_resume_store_rewatching_reuses_same_slot():
+    store = bytearray(fmt.RESUME_STORE_BYTES)
+    record = fmt.ResumeRecord(frame_count=300, last_presented_frame=5, filename="MOVIE.BIN")
+
+    first_slot = fmt.resume_store_slot_for(store, record.filename)
+    fmt.resume_store_write_slot(store, first_slot, record)
+
+    record.last_presented_frame = 150
+    second_slot = fmt.resume_store_slot_for(store, record.filename)
+    assert second_slot == first_slot
+    fmt.resume_store_write_slot(store, second_slot, record)
+
+    found = fmt.resume_store_find(store, "MOVIE.BIN")
+    assert found == (first_slot, record)
+
+
+def test_resume_store_fills_then_evicts_slot_zero():
+    store = bytearray(fmt.RESUME_STORE_BYTES)
+
+    for i in range(fmt.RESUME_SLOT_COUNT):
+        record = fmt.ResumeRecord(frame_count=100 + i, last_presented_frame=i, filename=f"M{i}.BIN")
+        slot = fmt.resume_store_slot_for(store, record.filename)
+        assert slot == i
+        fmt.resume_store_write_slot(store, slot, record)
+
+    assert fmt.resume_store_slot_for(store, "OVERFLOW.BIN") == 0
+    found = fmt.resume_store_find(store, "M0.BIN")
+    assert found is not None and found[0] == 0

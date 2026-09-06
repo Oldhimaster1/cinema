@@ -152,6 +152,126 @@ static void test_resume_round_trip(void)
     }
 }
 
+/* --- multi-slot resume store tests ------------------------------------ */
+
+static void test_resume_store_empty_store_finds_nothing(void)
+{
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t out;
+
+    memset(store, 0, sizeof(store));
+    CHECK(cin2_resume_store_find(store, "MOVIE.BIN", &out) == -1,
+          "an all-zero store (never written, or an old single-slot appvar) finds nothing");
+}
+
+static void test_resume_store_write_then_find(void)
+{
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t in, out;
+    int slot;
+
+    memset(store, 0, sizeof(store));
+    in.frame_count = 500;
+    in.last_presented_frame = 42;
+    strcpy(in.filename, "MOVIE1.BIN");
+
+    slot = cin2_resume_store_slot_for(store, in.filename);
+    CHECK(slot == 0, "first write to an empty store picks slot 0");
+    cin2_resume_store_write_slot(store, slot, &in);
+
+    CHECK(cin2_resume_store_find(store, "MOVIE1.BIN", &out) == slot,
+          "find locates the slot just written");
+    CHECK(out.frame_count == in.frame_count, "found record's frame_count matches");
+    CHECK(out.last_presented_frame == in.last_presented_frame,
+          "found record's last_presented_frame matches");
+    CHECK(cin2_resume_store_find(store, "OTHER.BIN", &out) == -1,
+          "a different filename is not found in a single-entry store");
+}
+
+static void test_resume_store_multiple_movies_coexist(void)
+{
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t a_in, b_in, out;
+    int slot_a, slot_b;
+
+    memset(store, 0, sizeof(store));
+    a_in.frame_count = 100;
+    a_in.last_presented_frame = 10;
+    strcpy(a_in.filename, "A.BIN");
+    b_in.frame_count = 200;
+    b_in.last_presented_frame = 20;
+    strcpy(b_in.filename, "B.BIN");
+
+    slot_a = cin2_resume_store_slot_for(store, a_in.filename);
+    cin2_resume_store_write_slot(store, slot_a, &a_in);
+    slot_b = cin2_resume_store_slot_for(store, b_in.filename);
+    CHECK(slot_b != slot_a, "a second distinct movie gets a different slot");
+    cin2_resume_store_write_slot(store, slot_b, &b_in);
+
+    CHECK(cin2_resume_store_find(store, "A.BIN", &out) == slot_a
+          && out.last_presented_frame == 10, "A's resume position survives B being added");
+    CHECK(cin2_resume_store_find(store, "B.BIN", &out) == slot_b
+          && out.last_presented_frame == 20, "B's resume position is found correctly");
+}
+
+static void test_resume_store_rewatching_reuses_same_slot(void)
+{
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t in, out;
+    int first_slot, second_slot;
+
+    memset(store, 0, sizeof(store));
+    in.frame_count = 300;
+    in.last_presented_frame = 5;
+    strcpy(in.filename, "MOVIE.BIN");
+    first_slot = cin2_resume_store_slot_for(store, in.filename);
+    cin2_resume_store_write_slot(store, first_slot, &in);
+
+    /* Same movie, further along -- must update the existing slot, not
+     * spawn a second entry for the same filename. */
+    in.last_presented_frame = 150;
+    second_slot = cin2_resume_store_slot_for(store, in.filename);
+    CHECK(second_slot == first_slot, "re-saving the same movie reuses its own slot");
+    cin2_resume_store_write_slot(store, second_slot, &in);
+
+    CHECK(cin2_resume_store_find(store, "MOVIE.BIN", &out) == first_slot
+          && out.last_presented_frame == 150,
+          "the slot now holds the updated position, not a duplicate");
+}
+
+static void test_resume_store_fills_then_evicts_slot_zero(void)
+{
+    uint8_t store[CIN2_RESUME_STORE_BYTES];
+    cin2_resume_t in, out;
+    int i;
+
+    memset(store, 0, sizeof(store));
+    for (i = 0; i < CIN2_RESUME_SLOT_COUNT; ++i) {
+        char name[16];
+        int slot;
+
+        sprintf(name, "M%d.BIN", i);
+        in.frame_count = (uint32_t)(100 + i);
+        in.last_presented_frame = (uint32_t)i;
+        strcpy(in.filename, name);
+
+        slot = cin2_resume_store_slot_for(store, in.filename);
+        CHECK(slot == i, "slots fill in order while the store still has room");
+        cin2_resume_store_write_slot(store, slot, &in);
+    }
+
+    /* All CIN2_RESUME_SLOT_COUNT slots are now genuinely in use by that
+     * many different movies -- a new, never-seen-before movie has
+     * nowhere free to go, so it falls back to overwriting slot 0 (see
+     * cin2_resume_store_slot_for's doc comment: not true LRU, just a
+     * bound on history). */
+    strcpy(in.filename, "OVERFLOW.BIN");
+    CHECK(cin2_resume_store_slot_for(store, in.filename) == 0,
+          "a new movie once the store is full evicts slot 0");
+    CHECK(cin2_resume_store_find(store, "M0.BIN", &out) == 0,
+          "the evicted movie's old record is still findable until actually overwritten");
+}
+
 /* --- crc32 known-answer test ------------------------------------------ */
 
 static void test_crc32_known_vectors(void)
@@ -183,6 +303,11 @@ int main(void)
     test_header_round_trip();
     test_v1_drive_not_detected_as_v2();
     test_resume_round_trip();
+    test_resume_store_empty_store_finds_nothing();
+    test_resume_store_write_then_find();
+    test_resume_store_multiple_movies_coexist();
+    test_resume_store_rewatching_reuses_same_slot();
+    test_resume_store_fills_then_evicts_slot_zero();
     test_crc32_known_vectors();
     test_frame_count_fits_drive();
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import struct
 import zlib
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Optional, Sequence, Tuple
 
 MAGIC = b"CIN2"
 VERSION = 2
@@ -178,3 +178,53 @@ def parse_resume_record(raw: bytes) -> ResumeRecord:
         last_presented_frame=last_presented_frame,
         filename=filename,
     )
+
+
+# --- multi-slot resume store: mirrors src/cin2.c's cin2_resume_store_*
+# functions. See docs/CIN2_FORMAT.md for why more than one slot exists
+# (a FAT32 drive can hold several movies, each with its own resume
+# position). ---
+
+RESUME_SLOT_COUNT = 8
+RESUME_STORE_BYTES = RESUME_BYTES * RESUME_SLOT_COUNT
+
+
+def resume_store_find(raw: bytes, filename: str) -> Optional[Tuple[int, ResumeRecord]]:
+    """Searches a RESUME_STORE_BYTES-long store for a valid slot whose
+    filename matches. Returns (slot_index, record), or None if no slot
+    matches -- including an all-zero store (never written) or a
+    single-slot store from an older build (too short to index at all)."""
+    for i in range(RESUME_SLOT_COUNT):
+        start = i * RESUME_BYTES
+        try:
+            record = parse_resume_record(raw[start:start + RESUME_BYTES])
+        except ValueError:
+            continue
+        if record.filename == filename:
+            return i, record
+    return None
+
+
+def resume_store_slot_for(raw: bytes, filename: str) -> int:
+    """Picks which slot a new resume record for filename should be
+    written into: the slot already holding filename if one exists, else
+    the first invalid (empty/corrupt) slot, else slot 0."""
+    first_invalid = -1
+    for i in range(RESUME_SLOT_COUNT):
+        start = i * RESUME_BYTES
+        try:
+            record = parse_resume_record(raw[start:start + RESUME_BYTES])
+        except ValueError:
+            if first_invalid < 0:
+                first_invalid = i
+            continue
+        if record.filename == filename:
+            return i
+    return first_invalid if first_invalid >= 0 else 0
+
+
+def resume_store_write_slot(raw: bytearray, slot: int, record: ResumeRecord) -> None:
+    """Writes record into slot `slot` of the RESUME_STORE_BYTES-long
+    mutable store, in place."""
+    start = slot * RESUME_BYTES
+    raw[start:start + RESUME_BYTES] = build_resume_record(record)

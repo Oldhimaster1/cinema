@@ -91,8 +91,17 @@ the format automatically from the drive.
 | Left / Right  | Seek 10s back / forward                    |
 | Up / Down     | Seek 60s forward / back                    |
 | 0             | Restart from the beginning                 |
+| Graph         | Toggle loop/repeat                         |
 | Mode          | Pin the on-screen overlay open/closed      |
-| Clear         | Exit (saves resume state)                  |
+| Clear         | Exit -- returns to the file browser (saves resume state) |
+
+Exiting a movie (Clear, or reaching the end) goes back to the file
+browser rather than quitting Cinema, so picking another movie off the
+same drive doesn't require relaunching. The browser also shows each
+movie's length next to its name. Resume state is remembered per movie
+(up to 8), not just for whichever one you watched most recently. If
+playback stalls waiting on USB reads for more than half a second, a
+"Buffering..." message appears rather than just freezing silently.
 
 A progress bar, elapsed/total time, live FPS, and per-frame decode cost
 appear briefly on any keypress (in the black letterbox bar under the

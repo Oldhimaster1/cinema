@@ -106,12 +106,13 @@ static void test_full_playback_no_resume(void)
     CHECK(g_frames_rendered == frame_count, "every frame got rendered exactly once");
 
     {
-        uint8_t raw[CIN2_RESUME_BYTES];
-        int len = sim_get_resume_record(raw, sizeof(raw));
+        uint8_t store[CIN2_RESUME_STORE_BYTES];
+        int len = sim_get_resume_record(store, sizeof(store));
         cin2_resume_t resume;
 
-        CHECK(len == CIN2_RESUME_BYTES, "resume record was written with the right size");
-        CHECK(cin2_parse_resume_record(raw, &resume), "written resume record parses");
+        CHECK(len == CIN2_RESUME_STORE_BYTES, "resume store was written with the right size");
+        CHECK(cin2_resume_store_find(store, "", &resume) >= 0,
+              "written resume record found (raw single-image mode uses filename \"\")");
         CHECK(resume.frame_count == frame_count, "resume record frame_count matches movie");
         CHECK(resume.last_presented_frame == frame_count - 1,
               "resume record points at the last frame shown");
@@ -292,15 +293,56 @@ static void test_seek_while_paused_resumes_and_jumps_forward(void)
           "the seek skipped content rather than playing all 300 frames linearly");
 
     {
-        uint8_t raw[CIN2_RESUME_BYTES];
-        int len = sim_get_resume_record(raw, sizeof(raw));
+        uint8_t store[CIN2_RESUME_STORE_BYTES];
+        int len = sim_get_resume_record(store, sizeof(store));
         cin2_resume_t resume;
 
-        CHECK(len == CIN2_RESUME_BYTES, "resume record written");
-        CHECK(cin2_parse_resume_record(raw, &resume), "resume record parses");
+        CHECK(len == CIN2_RESUME_STORE_BYTES, "resume store written");
+        CHECK(cin2_resume_store_find(store, "", &resume) >= 0, "resume record found");
         CHECK(resume.last_presented_frame == frame_count - 1,
               "movie still ran to its actual last frame after the mid-playback seek");
     }
+
+    free(drive);
+}
+
+static void test_loop_toggle_restarts_from_beginning(void)
+{
+    /* Short movie so a full pass finishes quickly. Loop is enabled
+     * almost immediately (call 5, well before frame 0 even renders) and
+     * disabled generously far past where one pass should have ended
+     * (call 400; a 5-frame pass takes roughly 5 * ~42 = ~210 GetCSC
+     * calls at this sim's pacing -- see the seek test above). Exactly
+     * which looped pass gets terminated doesn't matter for what this
+     * checks: only that playback didn't stop at the first end-of-movie
+     * (more frames rendered than one pass has) and did eventually stop
+     * once looping was turned back off (ok == true, not a hang). */
+    const uint32_t frame_count = 5;
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(frame_count, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "5-frame header parses");
+
+    sim_reset_injected_keys();
+    sim_inject_key_at_call(5, sk_Graph);    /* enable loop */
+    sim_inject_key_at_call(400, sk_Graph);  /* disable loop so playback can finish */
+
+    g_frames_rendered = 0;
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
+
+    CHECK(ok, "playback completes normally once looping is turned back off");
+    CHECK(g_frames_rendered > frame_count,
+          "more frames were rendered than one pass has -- it actually looped");
 
     free(drive);
 }
@@ -337,6 +379,7 @@ int main(void)
     test_single_frame_movie();
     test_exact_slot_count_frame_movie();
     test_seek_while_paused_resumes_and_jumps_forward();
+    test_loop_toggle_restarts_from_beginning();
     test_empty_movie_rejected();
 
     if (g_failures == 0) {
