@@ -389,6 +389,13 @@ int main(void)
     memset(&global, 0, sizeof(global_t));
     os_SetCursorPos(1, 0);
 
+    /* The OS runs at a lower power-saving default clock speed; without
+     * this, every CPU-bound part of Cinema (decoding, FAT32 cluster-chain
+     * walking, ...) runs several times slower than it needs to for no
+     * benefit here (playback keeps the screen and USB busy the whole
+     * time regardless). Restored on every exit path below. */
+    boot_Set48MHzMode();
+
     /* usb initialization loop; waits for something to be plugged in */
     do
     {
@@ -526,6 +533,7 @@ int main(void)
         while (!os_GetCSC());
     }
 
+    boot_Set6MHzMode();
     return 0;
 
 msd_error:
@@ -534,6 +542,7 @@ msd_error:
 
     while (!os_GetCSC());
 
+    boot_Set6MHzMode();
     return 0;
 
 usb_error:
@@ -541,5 +550,6 @@ usb_error:
 
     while (!os_GetCSC());
 
+    boot_Set6MHzMode();
     return 0;
 }

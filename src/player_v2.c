@@ -119,21 +119,6 @@ typedef struct {
     uint32_t fps_tenths;      /* measured presentation rate x10 */
 } player_v2_t;
 
-/* TEMPORARY: pauses for ~2 real seconds on hardware so a diagnostic
- * putstr() actually gets seen before the next step runs, without
- * relying on os_GetCSC() (which the host simulation tests never
- * schedule a key for at these new call sites, and would otherwise hang
- * forever). Remove alongside the checkpoints that use it once the crash
- * under investigation is fixed. */
-static void checkpoint_pause(void)
-{
-    clock_t start = clock();
-
-    while ((clock_t)(clock() - start) < (clock_t)(2 * CLOCKS_PER_SEC)) {
-        usb_HandleEvents();
-    }
-}
-
 /* Callback only records what happened -- no graphics calls, no printing,
  * no LBA math, and (per the comment on pending_parts above) no queueing
  * of the next part either. The main loop decides what any of it means. */
@@ -244,16 +229,18 @@ static msd_error_t queue_frame(global_t *global, const fat32ro_extent_map_t *map
  * CINEMA_MAX_PARTS_PER_FRAME). Returns false only if msd_ReadAsync
  * itself failed to queue, or a frame couldn't be resolved to sectors at
  * all (not if a previously-queued transfer later errors out -- that's
- * caught via find_failed_slot in the main loop). */
-/* verbose_diag is TEMPORARY (see player_v2_run): only prefill_frames()
- * passes true. refill_empty_slots also runs on every single iteration
- * of the main playback loop, so printing/pausing there too would stall
- * every frame of actual playback by ~2 seconds each -- and, under the
- * host simulation's clock, compounds into a runaway feedback loop
- * (each pause's own usb_HandleEvents() calls advance the simulated
- * clock, which pushes the "wanted" frame further ahead, requiring more
- * frames queued, each adding another pause -- never converging). */
-static bool refill_empty_slots(player_v2_t *player, bool verbose_diag)
+ * caught via find_failed_slot in the main loop).
+ *
+ * A usb_HandleEvents() call after each individual slot's queueing call
+ * (rather than only queueing all of them back to back and servicing
+ * events afterward) is deliberate: real-hardware testing during
+ * development hit an unexplained hard crash when several msd_ReadAsync
+ * calls were issued in a tight loop with no event-servicing between
+ * them, and reproducibly stopped happening once queueing was paced out
+ * this way. The exact mechanism was never pinned down further, but the
+ * cost of this is one extra call per slot (SLOT_COUNT of them, at most),
+ * which is negligible next to the read itself. */
+static bool refill_empty_slots(player_v2_t *player)
 {
     uint8_t i;
 
@@ -261,21 +248,10 @@ static bool refill_empty_slots(player_v2_t *player, bool verbose_diag)
         frame_slot_t *slot = &player->slots[i];
 
         if (slot->state == SLOT_NEEDS_NEXT_PART) {
-            if (verbose_diag) {
-                char dbg[32];
-                sprintf(dbg, "q slot=%u part=%u", i, (unsigned)slot->next_pending_part);
-                putstr(dbg);
-                checkpoint_pause();
-            }
-
             if (queue_slot_part(player->global, slot) != MSD_SUCCESS) {
                 return false;
             }
-
-            if (verbose_diag) {
-                putstr("q part ok");
-                checkpoint_pause();
-            }
+            usb_HandleEvents();
             continue;
         }
 
@@ -286,23 +262,11 @@ static bool refill_empty_slots(player_v2_t *player, bool verbose_diag)
             continue;
         }
 
-        if (verbose_diag) {
-            char dbg[32];
-            sprintf(dbg, "q slot=%u frame=%lu", i,
-                    (unsigned long)player->next_frame_to_queue);
-            putstr(dbg);
-            checkpoint_pause();
-        }
-
         if (queue_frame(player->global, player->movie_map, slot,
                          player->next_frame_to_queue) != MSD_SUCCESS) {
             return false;
         }
-
-        if (verbose_diag) {
-            putstr("q frame ok");
-            checkpoint_pause();
-        }
+        usb_HandleEvents();
 
         player->next_frame_to_queue++;
     }
@@ -343,7 +307,7 @@ static bool all_queued_slots_resolved(player_v2_t *player)
  * frame the original player waited for. */
 static bool prefill_frames(player_v2_t *player)
 {
-    if (!refill_empty_slots(player, true)) {
+    if (!refill_empty_slots(player)) {
         putstr("error queueing msd (prefill)");
         return false;
     }
@@ -365,7 +329,7 @@ static bool prefill_frames(player_v2_t *player)
         /* A slot that just finished one part of a multi-part
          * (fragmented-file) frame is sitting in SLOT_NEEDS_NEXT_PART --
          * without this, it would never progress during prefill. */
-        if (!refill_empty_slots(player, true)) {
+        if (!refill_empty_slots(player)) {
             putstr("error queueing msd (prefill)");
             return false;
         }
@@ -434,16 +398,17 @@ static uint32_t desired_frame(const player_v2_t *player, clock_t now)
     return (uint32_t)frame;
 }
 
-/* Relative brightness of an RGB565 entry. Only used to compare palette
+/* Relative brightness of an RGB1555 entry (gfx_SetPalette's real 5-5-5
+ * format -- see docs/CIN2_FORMAT.md). Only used to compare palette
  * entries against each other, so the weights just need to be sane and
  * the arithmetic integer -- the absolute scale is meaningless. */
-static uint16_t luminance565(uint16_t color)
+static uint16_t luminance1555(uint16_t color)
 {
-    uint16_t r = (color >> 11) & 0x1F;
-    uint16_t g = (color >> 5) & 0x3F;
+    uint16_t r = (color >> 10) & 0x1F;
+    uint16_t g = (color >> 5) & 0x1F;
     uint16_t b = color & 0x1F;
 
-    return (uint16_t)(2u * r + 3u * (g >> 1) + b);
+    return (uint16_t)(2u * r + 3u * g + b);
 }
 
 /* The OSD has no palette of its own -- CIN2 stores exactly 16 colors and
@@ -460,7 +425,7 @@ static void choose_osd_colors(player_v2_t *player, const cin2_header_t *header)
     player->osd_bg = 0;
 
     for (i = 0; i < 16; ++i) {
-        uint16_t lum = luminance565(header->palette[i]);
+        uint16_t lum = luminance1555(header->palette[i]);
 
         if (lum >= best) {
             best = lum;
@@ -783,7 +748,7 @@ static bool player_v2_loop(player_v2_t *player)
             }
         }
 
-        if (!refill_empty_slots(player, false)) {
+        if (!refill_empty_slots(player)) {
             putstr("error queueing msd (frame)");
             return false;
         }
@@ -921,21 +886,11 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.next_frame_to_queue = start_frame;
     choose_osd_colors(&player, header);
 
-    /* TEMPORARY diagnostic checkpoints (see the crash investigation in
-     * the project history): prefill runs here, before gfx_Begin(), so a
-     * fault in the FAT32-aware read-queueing path shows as a readable
-     * text-mode message rather than being swallowed by a graphics-mode
-     * crash with nothing left on screen to report. A clock()-based pause
-     * (not os_GetCSC()) so this stays exercisable by the host simulation
-     * tests, which don't inject a key at these new call sites. Remove
-     * once the real hardware crash is root-caused and fixed. */
-    putstr("checkpoint: prefilling...");
-    checkpoint_pause();
-
+    /* Prefill runs here, before gfx_Begin() -- it doesn't touch graphics
+     * at all, and keeping it out of graphics mode means a prefill error
+     * (e.g. a read failure) shows as a plain text message instead of
+     * being immediately replaced by a graphics-mode screen. */
     ok = prefill_frames(&player);
-
-    putstr(ok ? "checkpoint: prefill ok" : "checkpoint: prefill FAILED");
-    checkpoint_pause();
 
     if (ok) {
         gfx_Begin();

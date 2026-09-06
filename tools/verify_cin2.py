@@ -153,7 +153,8 @@ def verify(path: Path) -> dict:
                          "data after the last frame")
 
     # --- palette sanity (informational; any 16-bit value is technically
-    # legal RGB565, so this can only warn, not fail) -----------------------
+    # legal RGB1555 (the top bit is simply unused), so this can only warn,
+    # not fail) --------------------------------------------------------
     if len(set(palette)) < PALETTE_ENTRIES:
         warnings.append(f"palette has only {len(set(palette))} distinct colors "
                          f"of {PALETTE_ENTRIES} entries")

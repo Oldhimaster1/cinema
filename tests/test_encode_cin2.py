@@ -24,15 +24,16 @@ import encode_cin2 as enc  # noqa: E402
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
 
 
-def test_rgb888_to_rgb565_known_values():
-    assert enc.rgb888_to_rgb565(0, 0, 0) == 0x0000
-    assert enc.rgb888_to_rgb565(0xFF, 0xFF, 0xFF) == 0xFFFF
+def test_rgb888_to_rgb1555_known_values():
+    assert enc.rgb888_to_rgb1555(0, 0, 0) == 0x0000
+    # White: top bit stays unused/0 in 1555 -- 0x7FFF, not 0xFFFF.
+    assert enc.rgb888_to_rgb1555(0xFF, 0xFF, 0xFF) == 0x7FFF
     # Pure red: top 5 bits of R, nothing else.
-    assert enc.rgb888_to_rgb565(0xFF, 0, 0) == 0xF800
-    # Pure green: middle 6 bits.
-    assert enc.rgb888_to_rgb565(0, 0xFF, 0) == 0x07E0
+    assert enc.rgb888_to_rgb1555(0xFF, 0, 0) == 0x7C00
+    # Pure green: middle 5 bits (not 6 -- this isn't 565).
+    assert enc.rgb888_to_rgb1555(0, 0xFF, 0) == 0x03E0
     # Pure blue: bottom 5 bits.
-    assert enc.rgb888_to_rgb565(0, 0, 0xFF) == 0x001F
+    assert enc.rgb888_to_rgb1555(0, 0, 0xFF) == 0x001F
 
 
 def _solid_frame(color):
@@ -47,7 +48,7 @@ def test_build_global_palette_has_16_entries():
         _solid_frame((255, 255, 0)),
     ]
     palette_image = enc.build_global_palette(frames, sample_count=4)
-    entries = enc.palette_image_to_rgb565(palette_image)
+    entries = enc.palette_image_to_rgb1555(palette_image)
     assert len(entries) == fmt.PALETTE_ENTRIES
     assert all(0 <= e <= 0xFFFF for e in entries)
 

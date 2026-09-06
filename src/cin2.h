@@ -22,7 +22,7 @@ typedef struct {
     uint32_t fps_num;
     uint32_t fps_den;
     uint32_t frame_count;
-    uint16_t palette[16]; /* raw RGB565, ready for gfx_SetPalette */
+    uint16_t palette[16]; /* raw RGB1555 (gfx_RGBTo1555 layout), ready for gfx_SetPalette */
 } cin2_header_t;
 
 /* Cheap check: true if raw[0..3] == "CIN2". Used to distinguish a v2

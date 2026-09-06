@@ -47,13 +47,14 @@ def frame_indices(raw: bytes, header: fmt.Cin2Header, frame_number: int) -> list
 
 def indices_to_rgb_image(indices: list[int], header: fmt.Cin2Header) -> Image.Image:
     """Renders logical WIDTHxHEIGHT indices as an RGB image using the
-    header's palette (RGB565 -> RGB888), i.e. the "native" 160x96 view."""
+    header's palette (RGB1555 -> RGB888, matching gfx_SetPalette's real
+    entry format), i.e. the "native" 160x96 view."""
     rgb_palette = []
     for entry in header.palette:
-        r = (entry >> 11) & 0x1F
-        g = (entry >> 5) & 0x3F
+        r = (entry >> 10) & 0x1F
+        g = (entry >> 5) & 0x1F
         b = entry & 0x1F
-        rgb_palette.append(((r * 255) // 31, (g * 255) // 63, (b * 255) // 31))
+        rgb_palette.append(((r * 255) // 31, (g * 255) // 31, (b * 255) // 31))
 
     img = Image.new("RGB", (fmt.WIDTH, fmt.HEIGHT))
     pixels = [rgb_palette[i] for i in indices]

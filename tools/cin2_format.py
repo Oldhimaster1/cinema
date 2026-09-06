@@ -66,7 +66,7 @@ def build_header(header: Cin2Header) -> bytes:
         raise ValueError(f"palette must have exactly {PALETTE_ENTRIES} entries")
     for entry in header.palette:
         if not 0 <= entry <= 0xFFFF:
-            raise ValueError("palette entries must fit in 16 bits (RGB565)")
+            raise ValueError("palette entries must fit in 16 bits (RGB1555)")
 
     buf = bytearray(HEADER_BYTES)
     buf[0:4] = MAGIC

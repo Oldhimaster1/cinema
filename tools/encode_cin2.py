@@ -130,9 +130,14 @@ def pack_frame(indices: Sequence[int]) -> bytes:
     return bytes(out)
 
 
-def rgb888_to_rgb565(r: int, g: int, b: int) -> int:
-    """Packs 8-bit RGB into the RGB565 layout gfx_SetPalette expects."""
-    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+def rgb888_to_rgb1555(r: int, g: int, b: int) -> int:
+    """Packs 8-bit RGB into the 1555 layout gfx_SetPalette actually
+    expects (5 bits each of R/G/B, top bit unused) -- the same bit
+    layout as the real graphx.h's gfx_RGBTo1555 macro. Not RGB565: CE's
+    GraphX has no 565 palette format at all, only 1555 (confirmed by
+    real-hardware testing showing wrong/inverted-looking colors when
+    this was originally packed as 565)."""
+    return ((r & 0xF8) << 7) | ((g & 0xF8) << 2) | (b >> 3)
 
 
 # --- ffmpeg/ffprobe plumbing -------------------------------------------
@@ -266,7 +271,7 @@ def build_global_palette(frames: Sequence[Image.Image], sample_count: int) -> Im
     return sheet.quantize(colors=PALETTE_ENTRIES, method=Image.Quantize.MEDIANCUT)
 
 
-def palette_image_to_rgb565(palette_image: Image.Image) -> List[int]:
+def palette_image_to_rgb1555(palette_image: Image.Image) -> List[int]:
     raw = palette_image.getpalette()
     if raw is None:
         raise ValueError("palette_image has no palette")
@@ -278,7 +283,7 @@ def palette_image_to_rgb565(palette_image: Image.Image) -> List[int]:
             r, g, b = raw[offset], raw[offset + 1], raw[offset + 2]
         else:
             r = g = b = 0
-        entries.append(rgb888_to_rgb565(r, g, b))
+        entries.append(rgb888_to_rgb1555(r, g, b))
     return entries
 
 
@@ -368,7 +373,7 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
             max_frames=palette_samples,
         ))
         palette_image = build_global_palette(sample_frames, palette_samples)
-        palette = palette_image_to_rgb565(palette_image)
+        palette = palette_image_to_rgb1555(palette_image)
         del sample_frames  # bounded (<= palette_samples), but no reason to hold it longer
 
         # --- pass 2: full-rate stream, quantized+packed in parallel ---

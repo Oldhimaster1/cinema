@@ -56,14 +56,19 @@ palette, or padding -- frames are back-to-back.
 | 14     | 4    | `fps_den`      | u32, frame rate denominator (e.g. `1` or `1001`)     |
 | 18     | 4    | `frame_count`  | u32, total frames in the stream                      |
 | 22     | 4    | `header_crc32` | u32, CRC-32 (IEEE 802.3 poly) over bytes `[0, 22)`    |
-| 26     | 32   | `palette`      | 16 entries x 2 bytes each, RGB565, index 0..15        |
+| 26     | 32   | `palette`      | 16 entries x 2 bytes each, RGB1555, index 0..15       |
 | 58     | 454  | reserved       | must be zero-filled                                   |
 
 `palette` entries are written verbatim into the LCD's hardware palette
-(`gfx_SetPalette(header.palette, 32, 0)`), so they use the same packed
-RGB565 layout GraphX uses everywhere else (`gfx_RGBTo1555`-style bit
-layout is *not* used here -- this is plain 5-6-5, matching
-`gfx_SetPalette`'s documented entry format).
+(`gfx_SetPalette(header.palette, 32, 0)`), packed as RGB1555 -- the same
+5-5-5-with-an-unused-top-bit layout as GraphX's own `gfx_RGBTo1555`
+macro (`((r>>3)<<10) | ((g>>3)<<5) | (b>>3)`). An earlier version of
+this doc incorrectly claimed `gfx_SetPalette` wanted plain 5-6-5
+instead -- an assumption that was never actually checked against the
+real `graphx.h`, which has no RGB565 macro or format at all, only
+1555. Real-hardware testing surfaced the mistake as visibly wrong
+colors; `tools/encode_cin2.py`'s `rgb888_to_rgb1555` and this format
+now agree with the real header.
 
 Only the pre-CRC fields (`magic` through `frame_count`, 22 bytes) are
 covered by `header_crc32`. The palette and pixel data are not checksummed
