@@ -556,6 +556,59 @@ static void test_extent_map_reuses_fat_sectors_instead_of_rereading(void)
           "FAT sectors are reused across cluster steps, not re-read once per cluster");
 }
 
+static void test_extent_map_batches_fat_reads_across_nearby_fragments(void)
+{
+    /* Regression test for the fragmented-file case the single-sector
+     * cache above doesn't help with: a real drive's fragments still
+     * tend to draw from a fairly narrow range of the FAT even when the
+     * file itself isn't contiguous, so a chain that keeps jumping
+     * between two cluster regions (defeating the single-sector cache's
+     * "same sector as last time" reuse) should still cost close to ONE
+     * device read overall, as long as every cluster it touches falls
+     * within one FAT_CACHE_SECTORS-wide window -- proving the cache now
+     * buffers a range of FAT sectors per fill, not just one. */
+    const uint32_t fragments = 20;
+    const uint32_t low_start = 10;
+    const uint32_t high_start = 400; /* cluster*4/512 == 3 here, low_start's is 0 --
+                                         different FAT sectors, both inside one
+                                         FAT_CACHE_SECTORS-wide cache window. */
+    fs_layout_t l;
+    fat32ro_volume_t vol;
+    fat32ro_extent_map_t map;
+    uint32_t i;
+
+    l.base_lba = 0;
+    l.reserved_sectors = 1;
+    l.sectors_per_cluster = 1;
+    l.num_fats = 1;
+    l.fat_size_sectors = 32;
+    l.root_cluster = 2;
+    l.total_sectors = l.base_lba + l.reserved_sectors + l.fat_size_sectors + high_start + fragments + 10;
+
+    reset_disk();
+    format_disk(&l);
+    for (i = 0; i < fragments; ++i) {
+        uint32_t low = low_start + i;
+        uint32_t high = high_start + i;
+        bool last = (i == fragments - 1);
+
+        set_fat_entry(&l, low, high);
+        set_fat_entry(&l, high, last ? 0x0FFFFFFF : low_start + i + 1);
+    }
+
+    CHECK(fat32ro_mount(&vol, disk_read_counting, NULL) == FAT32RO_SUCCESS,
+          "mount for ping-ponging fragmented file");
+
+    g_read_calls = 0;
+    CHECK(fat32ro_build_extent_map(&vol, low_start, (uint32_t)fragments * 2 * 512u, &map)
+              == FAT32RO_SUCCESS,
+          "fragmented-but-nearby file maps successfully");
+    CHECK(map.extent_count == fragments * 2,
+          "every jump is non-consecutive, so each cluster is its own extent");
+    CHECK(g_read_calls <= 2,
+          "all touched FAT sectors fall in one cache window, so one fill covers the whole walk");
+}
+
 static void test_extent_map_fragmented_file(void)
 {
     fs_layout_t l = standard_layout(0);
@@ -756,6 +809,7 @@ int main(void)
 
     test_extent_map_contiguous_file();
     test_extent_map_reuses_fat_sectors_instead_of_rereading();
+    test_extent_map_batches_fat_reads_across_nearby_fragments();
     test_extent_map_fragmented_file();
     test_extent_map_rounds_up_to_cluster_but_not_beyond();
     test_extent_map_zero_length_file();
