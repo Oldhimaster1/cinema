@@ -7,7 +7,6 @@
 #include <msddrvce.h>
 #include <fileioc.h>
 #include <graphx.h>
-#include <keypadc.h>
 #include <tice.h>
 
 #include <stddef.h>
@@ -65,9 +64,6 @@ uint8_t os_GetCSC(void) { return sk_Clear; /* always "exit" so loops terminate *
 void os_DisableAPD(void) {}
 void os_EnableAPD(void) {}
 uint8_t boot_GetBatteryStatus(void) { return 0; }
-
-uint8_t kb_Data[8];
-void kb_Scan(void) {} /* kb_Data stays all-zero: no key ever "held" */
 
 void gfx_Begin(void) {}
 void gfx_End(void) {}

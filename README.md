@@ -95,8 +95,8 @@ the format automatically from the drive.
 | Key           | Action                                    |
 |---------------|--------------------------------------------|
 | 2nd / Enter   | Pause / resume                             |
-| Left / Right  | Seek 10s back / forward (hold to keep scrubbing) |
-| Up / Down     | Seek 60s forward / back (hold to keep scrubbing) |
+| Left / Right  | Seek 10s back / forward                    |
+| Up / Down     | Seek 60s forward / back                    |
 | Window / Y=   | Step one frame forward / back (while paused) |
 | 0             | Restart from the beginning                 |
 | Graph         | Toggle loop/repeat                         |

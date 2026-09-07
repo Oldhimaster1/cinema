@@ -9,7 +9,6 @@
 #include <msddrvce.h>
 #include <fileioc.h>
 #include <graphx.h>
-#include <keypadc.h>
 #include <tice.h>
 
 #include <stdint.h>
@@ -22,8 +21,6 @@ uint8_t gfx_vram_stub[GFX_LCD_HEIGHT][GFX_LCD_WIDTH];
 void os_DisableAPD(void) {}
 void os_EnableAPD(void) {}
 uint8_t boot_GetBatteryStatus(void) { return 0; }
-
-uint8_t kb_Data[8];
 
 /* --- deterministic fake clock -------------------------------------
  * player_v2.c's scheduler is driven entirely by clock()/CLOCKS_PER_SEC.
@@ -193,25 +190,10 @@ void sim_inject_key_at_call(int call_index, uint8_t key)
     }
 }
 
-/* player_v2.c's real kb_Scan() call is now throttled (see its
- * V2_KB_SCAN_INTERVAL_TICKS comment), so it won't necessarily land on
- * the exact os_GetCSC() call_index a test injects a directional key at
- * -- unlike os_GetCSC() itself, which is still single-shot at an exact
- * call. So a directional key's "held" state is remembered separately
- * here and mirrored into kb_Data for a generous window of subsequent
- * calls (comfortably longer than the real throttle period in simulated
- * time, comfortably shorter than the scrub repeat delay so a test
- * injecting one key still sees exactly one resulting seek). */
-#define SIM_DIR_KEY_MIRROR_WINDOW 200
-static uint8_t g_last_injected_dir_key = 0;
-static int g_last_injected_dir_call = -SIM_DIR_KEY_MIRROR_WINDOW;
-
 void sim_reset_injected_keys(void)
 {
     g_injected_key_count = 0;
     g_getcsc_calls = 0;
-    g_last_injected_dir_key = 0;
-    g_last_injected_dir_call = -SIM_DIR_KEY_MIRROR_WINDOW;
 }
 
 void os_SetCursorPos(uint8_t row, uint8_t col) { (void)row; (void)col; }
@@ -226,41 +208,10 @@ uint8_t os_GetCSC(void)
     g_getcsc_calls++;
     for (i = 0; i < g_injected_key_count; ++i) {
         if (g_injected_keys[i].call_index == g_getcsc_calls) {
-            uint8_t key = g_injected_keys[i].key;
-
-            if (key == sk_Right || key == sk_Left || key == sk_Up || key == sk_Down) {
-                g_last_injected_dir_key = key;
-                g_last_injected_dir_call = g_getcsc_calls;
-            }
-            return key;
+            return g_injected_keys[i].key;
         }
     }
     return 0;
-}
-
-/* Mirrors the most recently os_GetCSC()-injected directional key into
- * raw kb_Data state for SIM_DIR_KEY_MIRROR_WINDOW calls after it was
- * injected (see that constant's comment for why a window, not an exact
- * call match, is needed now that the real kb_Scan() call is throttled).
- * This produces one held-then-released press per injection, long
- * enough for the real throttled call to reliably observe it at least
- * once, short enough that it reads as a single tap rather than a hold
- * that would trigger scrub-repeat. */
-void kb_Scan(void)
-{
-    uint8_t bit = 0;
-
-    if (g_getcsc_calls - g_last_injected_dir_call >= 0
-        && g_getcsc_calls - g_last_injected_dir_call < SIM_DIR_KEY_MIRROR_WINDOW) {
-        switch (g_last_injected_dir_key) {
-            case sk_Right: bit |= kb_Right; break;
-            case sk_Left:  bit |= kb_Left;  break;
-            case sk_Up:    bit |= kb_Up;    break;
-            case sk_Down:  bit |= kb_Down;  break;
-            default: break;
-        }
-    }
-    kb_Data[7] = bit;
 }
 
 /* --- cinema.h's putstr --------------------------------------------
