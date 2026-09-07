@@ -48,21 +48,40 @@ test_cin2() {
 test_structural_link() {
     $CC $STUB_CFLAGS \
         src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c \
-        src/fat32ro.c \
+        src/fat32ro.c src/render_v2.c \
         tests/stub_impl.c -o "$TMP/cinema_stub_link"
     "$TMP/cinema_stub_link"
 }
 
 test_player_v2_sim() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
-        src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c \
+        src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c src/render_v2.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim.c -o "$TMP/test_player_v2_sim"
     timeout 30 "$TMP/test_player_v2_sim"
+}
+
+# Focused integration check, not the whole test_player_v2_sim.c suite:
+# with CINEMA_RENDERER_FIXED_C selected instead of the default (mocked)
+# GraphX call, confirms real playback through player_v2_loop() actually
+# calls render_scaled_fixed_c() and produces correct on-screen pixels --
+# not just that the isolated algorithm is correct (test_render_v2.c
+# already proves that) or that playback "doesn't crash".
+test_player_v2_sim_fixed_c_integration() {
+    $CC $STUB_CFLAGS -Wl,--wrap=clock -DCINEMA_RENDERER=CINEMA_RENDERER_FIXED_C \
+        src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c src/render_v2.c \
+        tests/stub_impl_sim.c tests/test_player_v2_sim_fixed_c_integration.c \
+        -o "$TMP/test_player_v2_sim_fixed_c_integration"
+    timeout 30 "$TMP/test_player_v2_sim_fixed_c_integration"
 }
 
 test_fat32ro() {
     $CC $CFLAGS -o "$TMP/test_fat32ro" tests/test_fat32ro.c src/fat32ro.c
     "$TMP/test_fat32ro"
+}
+
+test_render_v2() {
+    $CC $STUB_CFLAGS -o "$TMP/test_render_v2" tests/test_render_v2.c src/render_v2.c
+    "$TMP/test_render_v2"
 }
 
 test_player_v1_sim() {
@@ -84,8 +103,10 @@ test_encoder() {
 
 run_step "cin2.c host unit tests"                   test_cin2
 run_step "fat32ro.c host unit tests"                test_fat32ro
+run_step "render_v2.c fixed-scale pixel correctness" test_render_v2
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim
+run_step "player_v2 sim w/ fixed-C renderer"         test_player_v2_sim_fixed_c_integration
 run_step "player_v1 end-to-end simulation"           test_player_v1_sim
 run_step "Python encoder tests"                      test_encoder
 

@@ -1,6 +1,7 @@
 #include "player_v2.h"
 #include "fat32ro.h"
 #include "msd_util.h"
+#include "render_v2.h"
 
 #include <fileioc.h>
 #include <graphx.h>
@@ -719,11 +720,20 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
      * be set once, which player_v2_run() already does during setup.
      *
      * There is no unpack/decode step at all: slot's buffer already IS
-     * the sprite gfx_ScaledSprite_NoClip draws from (see frame_slot_t),
-     * frame bytes landed there straight from the USB read. The 2x
-     * scale-up is GraphX's own library routine, the same one Cinema's
-     * v1 (legacy) player uses successfully at this exact scale factor. */
+     * the sprite data the renderer draws from (see frame_slot_t), frame
+     * bytes landed there straight from the USB read. Which renderer
+     * actually does the 2x scale-up is chosen at compile time -- see
+     * render_v2.h. Default is GraphX's own library routine (the same
+     * one Cinema's v1 (legacy) player uses successfully at this exact
+     * scale factor); CINEMA_RENDERER_FIXED_C/_FIXED_ASM are Cinema's own
+     * specialized replacements, opt-in via the Makefile. */
+#if CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
+    render_scaled_fixed_c(slot_sprite(slot)->data);
+#elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
+    render_scaled_fixed_asm(slot_sprite(slot)->data);
+#else
     gfx_ScaledSprite_NoClip(slot_sprite(slot), 0, V2_Y_OFFSET, 2, 2);
+#endif
 
     /* "decode" is a bit of a misnomer now (there's nothing left to
      * decode) -- this measures the blit alone, not the OSD or the swap,
