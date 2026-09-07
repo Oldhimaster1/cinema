@@ -56,6 +56,16 @@
 #define V2_SCRUB_REPEAT_DELAY_TICKS    ((clock_t)(CLOCKS_PER_SEC / 2))
 #define V2_SCRUB_REPEAT_INTERVAL_TICKS ((clock_t)(CLOCKS_PER_SEC / 5))
 
+/* kb_Scan()'s own documentation says it disables interrupts -- calling
+ * it every single trip through the main loop (which can spin far
+ * faster than any human key-repeat rate while waiting for a frame)
+ * measurably fought with USB's own interrupt-driven transfer handling
+ * on real hardware, the same class of problem gfx_Wait() caused
+ * earlier. ~60ms is still far more responsive than any human press
+ * needs, while cutting the interrupt-disabling frequency by orders of
+ * magnitude during a busy-spin wait. */
+#define V2_KB_SCAN_INTERVAL_TICKS ((clock_t)(CLOCKS_PER_SEC / 16))
+
 /* A frame's data normally comes from one contiguous run of sectors, but
  * when the movie is a file on a FAT32 drive (see src/fat32ro.h) rather
  * than a raw whole-device image, a fragmented file can split a single
@@ -144,6 +154,7 @@ typedef struct {
      * one seek direction at once isn't a real use case. */
     bool scrub_left_held, scrub_right_held, scrub_up_held, scrub_down_held;
     clock_t next_scrub_tick;
+    clock_t next_kb_scan_tick;
 
     uint32_t dropped_frames;
     uint32_t repeated_frames;
@@ -1033,29 +1044,34 @@ static bool player_v2_loop(player_v2_t *player)
         }
 
         /* Hold-to-scrub: raw keypad state (not os_GetCSC(), which can't
-         * report "still held"), checked every iteration regardless of
-         * what os_GetCSC() saw above. Runs whether or not paused --
-         * seeking has always resumed playback (see player_seek_to_frame),
-         * and that's unchanged here. */
+         * report "still held"). Throttled to V2_KB_SCAN_INTERVAL_TICKS
+         * -- see its comment for why calling kb_Scan() every single trip
+         * through this loop was a real problem, not just excessive.
+         * Runs whether or not paused -- seeking has always resumed
+         * playback (see player_seek_to_frame), and that's unchanged. */
         {
             clock_t now = clock();
 
-            kb_Scan();
-            if (!handle_scrub_key(player, (kb_Data[7] & kb_Right) != 0,
-                                    &player->scrub_right_held, now, V2_SEEK_SMALL)) {
-                return false;
-            }
-            if (!handle_scrub_key(player, (kb_Data[7] & kb_Left) != 0,
-                                    &player->scrub_left_held, now, -V2_SEEK_SMALL)) {
-                return false;
-            }
-            if (!handle_scrub_key(player, (kb_Data[7] & kb_Up) != 0,
-                                    &player->scrub_up_held, now, V2_SEEK_LARGE)) {
-                return false;
-            }
-            if (!handle_scrub_key(player, (kb_Data[7] & kb_Down) != 0,
-                                    &player->scrub_down_held, now, -V2_SEEK_LARGE)) {
-                return false;
+            if ((clock_t)(now - player->next_kb_scan_tick) >= 0) {
+                kb_Scan();
+                player->next_kb_scan_tick = now + V2_KB_SCAN_INTERVAL_TICKS;
+
+                if (!handle_scrub_key(player, (kb_Data[7] & kb_Right) != 0,
+                                        &player->scrub_right_held, now, V2_SEEK_SMALL)) {
+                    return false;
+                }
+                if (!handle_scrub_key(player, (kb_Data[7] & kb_Left) != 0,
+                                        &player->scrub_left_held, now, -V2_SEEK_SMALL)) {
+                    return false;
+                }
+                if (!handle_scrub_key(player, (kb_Data[7] & kb_Up) != 0,
+                                        &player->scrub_up_held, now, V2_SEEK_LARGE)) {
+                    return false;
+                }
+                if (!handle_scrub_key(player, (kb_Data[7] & kb_Down) != 0,
+                                        &player->scrub_down_held, now, -V2_SEEK_LARGE)) {
+                    return false;
+                }
             }
         }
 

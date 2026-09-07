@@ -251,9 +251,18 @@ static uint8_t g_thumb_sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
  * extent boundary is treated the same as "no preview available" rather
  * than pulled in with the multi-part read machinery player_v2.c uses
  * for actual playback; a missing preview isn't worth that here. */
+/* Own small scratch map, deliberately NOT the caller's real movie_map:
+ * a thumbnail only ever needs the header sector plus frame 0 (31
+ * sectors total), so mapping just that much (see load_thumbnail below)
+ * keeps this cheap regardless of how long the movie actually is --
+ * walking the FULL cluster chain of, say, a 3-minute movie (tens of
+ * thousands of sectors) just to read its first frame was real, needless
+ * work every time the highlighted selection changed. */
+static fat32ro_extent_map_t g_thumb_map;
+
 static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
                             const fat32ro_dirent_t *entry, uint8_t *header_sector,
-                            fat32ro_extent_map_t *scratch_map, uint16_t *out_palette)
+                            uint16_t *out_palette)
 {
     cin2_header_t header;
     uint32_t lba, run;
@@ -262,11 +271,20 @@ static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
     if (entry->is_directory) {
         return false;
     }
-    if (read_cin2_header_for_entry(global, vol, entry, header_sector, scratch_map, &header) != NULL
+    if (fat32ro_build_extent_map(vol, entry->first_cluster,
+            (uint32_t)CIN2_HEADER_BYTES + (uint32_t)CIN2_FRAME_SECTORS * FAT32RO_SECTOR_BYTES,
+            &g_thumb_map) != FAT32RO_SUCCESS) {
+        return false;
+    }
+    if (!fat32ro_extent_lookup(&g_thumb_map, 0, &lba, &run)
+        || msd_Read(&global->msd, lba, 1, header_sector) != 1) {
+        return false;
+    }
+    if (!cin2_has_magic(header_sector) || !cin2_parse_header(header_sector, &header)
         || header.width != CINEMA_V2_WIDTH || header.height != CINEMA_V2_HEIGHT) {
         return false;
     }
-    if (!fat32ro_extent_lookup(scratch_map, cin2_frame_lba(0), &lba, &run)
+    if (!fat32ro_extent_lookup(&g_thumb_map, cin2_frame_lba(0), &lba, &run)
         || run < CIN2_FRAME_SECTORS
         || msd_Read(&global->msd, lba, CIN2_FRAME_SECTORS, sprite->data) != CIN2_FRAME_SECTORS) {
         return false;
@@ -292,8 +310,7 @@ static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
  * currently loaded into the thumbnail's palette slots. */
 static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
                              const fat32ro_dirent_t *entries, int count,
-                             const char (*durations)[8], uint8_t *header_sector,
-                             fat32ro_extent_map_t *scratch_map)
+                             const char (*durations)[8], uint8_t *header_sector)
 {
     static const uint16_t ui_palette[2] = { 0x7FFF, 0x0000 }; /* white, black */
     int selected = 0;
@@ -331,7 +348,7 @@ static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
             uint16_t movie_palette[16];
 
             thumb_valid = load_thumbnail(global, vol, &entries[selected], header_sector,
-                                          scratch_map, movie_palette);
+                                          movie_palette);
             if (thumb_valid) {
                 gfx_SetPalette(movie_palette, sizeof(movie_palette), 0);
             }
@@ -594,7 +611,7 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
         probe_durations(global, &vol, playable, playable_count, header_sector, durations);
 
         choice = run_file_browser(global, &vol, playable, playable_count, durations,
-                                   header_sector, &movie_map);
+                                   header_sector);
 
         if (choice < 0) {
             if (dir_depth > 0) {
