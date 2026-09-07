@@ -397,14 +397,52 @@ static void test_list_root_finds_files_and_skips_others(void)
 
     CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS, "mount for listing test");
 
+    /* Directories ARE listed now (subfolder browsing) -- only the
+     * volume label, LFN fragment, and deleted entry are skipped. */
     count = fat32ro_list_root(&vol, entries, 8);
-    CHECK(count == 2, "only the two real files are listed");
-    if (count == 2) {
+    CHECK(count == 3, "files and the subdirectory are listed; volume label/LFN/deleted are not");
+    if (count == 3) {
         CHECK(strcmp(entries[0].name, "MOVIE01.BIN") == 0, "first entry name reconstructed correctly");
         CHECK(entries[0].first_cluster == 10, "first entry cluster correct");
         CHECK(entries[0].file_size == 12345, "first entry size correct");
-        CHECK(strcmp(entries[1].name, "MOVIE02.BIN") == 0, "second entry name reconstructed correctly");
-        CHECK(entries[1].first_cluster == 30, "second entry cluster correct");
+        CHECK(!entries[0].is_directory, "MOVIE01.BIN is not flagged as a directory");
+        CHECK(strcmp(entries[1].name, "SUBDIR") == 0, "subdirectory name reconstructed correctly");
+        CHECK(entries[1].is_directory, "SUBDIR is flagged as a directory");
+        CHECK(entries[1].file_size == 0, "directory entries report file_size 0");
+        CHECK(strcmp(entries[2].name, "MOVIE02.BIN") == 0, "third entry name reconstructed correctly");
+        CHECK(entries[2].first_cluster == 30, "third entry cluster correct");
+        CHECK(!entries[2].is_directory, "MOVIE02.BIN is not flagged as a directory");
+    }
+}
+
+static void test_list_directory_skips_dot_entries_and_descends(void)
+{
+    /* Cluster 20 is SUBDIR's own directory: real FAT32 subdirectories
+     * always start with "." and ".." pseudo-entries pointing at
+     * themselves and their parent -- callers are expected to track
+     * their own way back up (see fat32ro_list_directory's doc comment),
+     * so both must be skipped rather than listed as browsable entries. */
+    fs_layout_t l = standard_layout(0);
+    fat32ro_volume_t vol;
+    fat32ro_dirent_t entries[8];
+    int count;
+
+    reset_disk();
+    format_disk(&l);
+    write_dir_entry(&l, 2, 0, "SUBDIR     ", 0x10, 20, 0);
+    set_fat_entry(&l, 20, 0x0FFFFFFF);
+    write_dir_entry(&l, 20, 0, ".          ", 0x10, 20, 0);
+    write_dir_entry(&l, 20, 1, "..         ", 0x10, 2, 0);
+    write_dir_entry(&l, 20, 2, "NESTED  BIN", 0x20, 40, 555);
+
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS, "mount for subdirectory test");
+
+    count = fat32ro_list_directory(&vol, 20, entries, 8);
+    CHECK(count == 1, "\".\" and \"..\" are skipped, only the real file is listed");
+    if (count == 1) {
+        CHECK(strcmp(entries[0].name, "NESTED.BIN") == 0, "file inside the subdirectory is found");
+        CHECK(entries[0].first_cluster == 40, "nested file's cluster read correctly");
+        CHECK(entries[0].file_size == 555, "nested file's size read correctly");
     }
 }
 
@@ -712,6 +750,7 @@ int main(void)
     test_mount_propagates_read_failure();
 
     test_list_root_finds_files_and_skips_others();
+    test_list_directory_skips_dot_entries_and_descends();
     test_list_root_stops_at_end_marker();
     test_list_root_caps_at_max_entries_without_misreporting();
 

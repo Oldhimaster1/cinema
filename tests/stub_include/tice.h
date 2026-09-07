@@ -23,11 +23,20 @@
 #define sk_Mode    0x37
 #define sk_Del     0x38
 #define sk_Graph   0x31
+#define sk_Window  0x34
+#define sk_Yequ    0x35
 
 void os_SetCursorPos(uint8_t row, uint8_t col);
 void os_PutStrFull(char *str);
 void os_NewLine(void);
 void os_ClrHome(void);
 uint8_t os_GetCSC(void);
+
+/* sys/power.h, reachable via the real <tice.h> -- see src/player_v1.c
+ * and src/player_v2.c for why (APD disabled during playback; battery
+ * level shown in the v2 OSD). */
+void os_DisableAPD(void);
+void os_EnableAPD(void);
+uint8_t boot_GetBatteryStatus(void);
 
 #endif

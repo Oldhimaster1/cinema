@@ -204,3 +204,56 @@ def test_cli_rejects_nonpositive_fps(tmp_path, capsys):
 
     with pytest.raises(SystemExit):
         enc.main([str(video_path), str(output_path), "--fps", "0"])
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_batch_encode_directory_produces_one_bin_per_video(tmp_path):
+    in_dir = tmp_path / "videos"
+    out_dir = tmp_path / "encoded"
+    in_dir.mkdir()
+
+    for name in ("a", "b"):
+        subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=15",
+             str(in_dir / f"{name}.mp4")],
+            check=True,
+        )
+
+    rc = enc.main([str(in_dir), str(out_dir), "--fps", "15", "--palette-samples", "4"])
+
+    assert rc == 0
+    assert (out_dir / "a.bin").exists()
+    assert (out_dir / "b.bin").exists()
+    header = fmt.parse_header((out_dir / "a.bin").read_bytes()[: fmt.HEADER_BYTES])
+    assert header.fps_num == 15 and header.fps_den == 1
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_batch_encode_one_bad_file_does_not_sink_the_others(tmp_path):
+    in_dir = tmp_path / "videos"
+    out_dir = tmp_path / "encoded"
+    in_dir.mkdir()
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=15",
+         str(in_dir / "good.mp4")],
+        check=True,
+    )
+    (in_dir / "bad.mp4").write_bytes(b"not actually a video")
+
+    rc = enc.main([str(in_dir), str(out_dir), "--fps", "15", "--palette-samples", "4"])
+
+    assert rc == 1, "at least one failure is reported via a nonzero exit code"
+    assert (out_dir / "good.bin").exists(), "the good file still encoded despite the bad one"
+    assert not (out_dir / "bad.bin").exists()
+
+
+def test_batch_encode_empty_directory_reports_no_matches(tmp_path):
+    in_dir = tmp_path / "empty"
+    in_dir.mkdir()
+
+    rc = enc.main([str(in_dir), str(tmp_path / "out")])
+
+    assert rc == 2

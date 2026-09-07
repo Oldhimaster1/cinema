@@ -117,6 +117,13 @@ bool player_v1_run(global_t *global, uint32_t start_lba)
     xfer_image.callback = v1_image_callback;
     xfer_image.userptr = &io_state;
 
+    /* A movie can easily run longer than TI-OS's idle auto-power-down
+     * timer, which only resets on a keypress -- watching a movie
+     * without touching a key for 5+ minutes would otherwise get cut off
+     * mid-playback. Re-enabled in cleanup below regardless of how this
+     * function exits. */
+    os_DisableAPD();
+
     gfx_Begin();
     graphics_active = true;
     gfx_SwapDraw();
@@ -228,6 +235,8 @@ bool player_v1_run(global_t *global, uint32_t start_lba)
     }
 
 cleanup:
+    os_EnableAPD();
+
     /* Fix for diagnosis's "track whether graphics started": a single
      * cleanup path instead of calling gfx_End() from inside callbacks or
      * forgetting it on an error goto. */

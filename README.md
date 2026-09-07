@@ -31,6 +31,13 @@ no need to dedicate a whole drive to a single video.
    pip install pillow
    python3 tools/encode_cin2.py input.mp4 output.bin
    ```
+   To convert a whole folder of videos at once, pass a directory for
+   both arguments instead of a single file: `python3 tools/encode_cin2.py
+   videos/ encoded/` encodes every video it finds directly inside
+   `videos/` into a matching `.bin` in `encoded/` (created if needed),
+   one movie's failure doesn't stop the rest, and a summary prints at
+   the end (`--batch-ext` controls which extensions count as videos).
+
    Requires `ffmpeg` on your PATH. `tools/encode_cin2.py` is a single
    self-contained script -- no sibling files needed, copy just that one
    file anywhere. It decodes the source once via a raw pipe (no PNG
@@ -80,16 +87,17 @@ the format automatically from the drive.
 | Key           | Action                                    |
 |---------------|--------------------------------------------|
 | Up / Down     | Move the selection                         |
-| Enter / 2nd   | Play the selected movie                    |
-| Clear         | Exit without playing anything              |
+| Enter / 2nd   | Play the selected movie / open a folder    |
+| Clear         | Go up a folder, or exit at the root        |
 
 **v2 controls:**
 
 | Key           | Action                                    |
 |---------------|--------------------------------------------|
 | 2nd / Enter   | Pause / resume                             |
-| Left / Right  | Seek 10s back / forward                    |
-| Up / Down     | Seek 60s forward / back                    |
+| Left / Right  | Seek 10s back / forward (hold to keep scrubbing) |
+| Up / Down     | Seek 60s forward / back (hold to keep scrubbing) |
+| Window / Y=   | Step one frame forward / back (while paused) |
 | 0             | Restart from the beginning                 |
 | Graph         | Toggle loop/repeat                         |
 | Mode          | Pin the on-screen overlay open/closed      |
@@ -97,11 +105,18 @@ the format automatically from the drive.
 
 Exiting a movie (Clear, or reaching the end) goes back to the file
 browser rather than quitting Cinema, so picking another movie off the
-same drive doesn't require relaunching. The browser also shows each
-movie's length next to its name. Resume state is remembered per movie
-(up to 8), not just for whichever one you watched most recently. If
-playback stalls waiting on USB reads for more than half a second, a
-"Buffering..." message appears rather than just freezing silently.
+same drive doesn't require relaunching. The browser shows each movie's
+length and a live thumbnail next to its name, supports subfolders (a
+folder shows as `name/`; Clear goes back up one level), and remembers
+resume state per movie (up to 8), not just for whichever one you
+watched most recently. If playback stalls waiting on USB reads for more
+than half a second, a "Buffering..." message appears rather than just
+freezing silently. The OSD's "B" figure is the calculator's raw battery
+status reading -- its exact scale isn't documented anywhere the code
+could confirm, so treat it as relative (higher = more charge) until
+someone reports what it reads at a known charge level. Auto-power-down
+is disabled while a movie is actually playing, so a long movie can't get
+cut off by the calculator going to sleep on its own.
 
 A progress bar, elapsed/total time, live FPS, and per-frame decode cost
 appear briefly on any keypress (in the black letterbox bar under the

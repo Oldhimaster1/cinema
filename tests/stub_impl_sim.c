@@ -8,8 +8,9 @@
 #include <usbdrvce.h>
 #include <msddrvce.h>
 #include <fileioc.h>
-#include <tice.h>
 #include <graphx.h>
+#include <keypadc.h>
+#include <tice.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -17,6 +18,12 @@
 #include <stdio.h>
 
 uint8_t gfx_vram_stub[GFX_LCD_HEIGHT][GFX_LCD_WIDTH];
+
+void os_DisableAPD(void) {}
+void os_EnableAPD(void) {}
+uint8_t boot_GetBatteryStatus(void) { return 0; }
+
+uint8_t kb_Data[8];
 
 /* --- deterministic fake clock -------------------------------------
  * player_v2.c's scheduler is driven entirely by clock()/CLOCKS_PER_SEC.
@@ -208,6 +215,36 @@ uint8_t os_GetCSC(void)
         }
     }
     return 0;
+}
+
+/* Mirrors whatever directional key os_GetCSC() reports THIS call
+ * (g_getcsc_calls, incremented there, is already up to date by the time
+ * player_v2.c's loop reaches kb_Scan() -- os_GetCSC() always runs first
+ * each iteration) into raw kb_Data state for exactly that one
+ * iteration -- a real press would show up in both at the same instant.
+ * This only ever produces a single-iteration "tap", never a genuinely
+ * held key across several iterations, so existing sim tests that
+ * inject one seek key still see exactly one seek step; it doesn't
+ * exercise the repeat/hold-to-scrub path itself (see README/commit
+ * notes on that gap). */
+void kb_Scan(void)
+{
+    int i;
+    uint8_t bit = 0;
+
+    for (i = 0; i < g_injected_key_count; ++i) {
+        if (g_injected_keys[i].call_index != g_getcsc_calls) {
+            continue;
+        }
+        switch (g_injected_keys[i].key) {
+            case sk_Right: bit |= kb_Right; break;
+            case sk_Left:  bit |= kb_Left;  break;
+            case sk_Up:    bit |= kb_Up;    break;
+            case sk_Down:  bit |= kb_Down;  break;
+            default: break;
+        }
+    }
+    kb_Data[7] = bit;
 }
 
 /* --- cinema.h's putstr --------------------------------------------

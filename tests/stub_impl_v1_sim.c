@@ -136,6 +136,9 @@ uint8_t os_GetCSC(void)
 
 void putstr(const char *str) { printf("[calc] %s\n", str); }
 
+void os_DisableAPD(void) {}
+void os_EnableAPD(void) {}
+
 unsigned g_frames_rendered = 0;
 
 void gfx_Begin(void) {}

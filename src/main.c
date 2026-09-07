@@ -259,6 +259,9 @@ static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
     uint32_t lba, run;
     gfx_sprite_t *sprite = (gfx_sprite_t *)g_thumb_sprite_data;
 
+    if (entry->is_directory) {
+        return false;
+    }
     if (read_cin2_header_for_entry(global, vol, entry, header_sector, scratch_map, &header) != NULL
         || header.width != CINEMA_V2_WIDTH || header.height != CINEMA_V2_HEIGHT) {
         return false;
@@ -312,12 +315,14 @@ static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
         gfx_PrintStringXY("Select a movie (Clear to exit)", BROWSER_TEXT_X, BROWSER_TITLE_Y);
         for (i = top; i < count && i < top + BROWSER_VISIBLE_ROWS; ++i) {
             char line[FAT32RO_MAX_NAME + 12];
+            char mark = (i == selected) ? '>' : ' ';
 
-            if (durations != NULL && durations[i][0] != '\0') {
-                sprintf(line, "%c%s %s", (i == selected) ? '>' : ' ',
-                        entries[i].name, durations[i]);
+            if (entries[i].is_directory) {
+                sprintf(line, "%c%s/", mark, entries[i].name);
+            } else if (durations != NULL && durations[i][0] != '\0') {
+                sprintf(line, "%c%s %s", mark, entries[i].name, durations[i]);
             } else {
-                sprintf(line, "%c%s", (i == selected) ? '>' : ' ', entries[i].name);
+                sprintf(line, "%c%s", mark, entries[i].name);
             }
             gfx_PrintStringXY(line, BROWSER_TEXT_X, BROWSER_ROW0_Y + (i - top) * BROWSER_ROW_H);
         }
@@ -430,7 +435,8 @@ static void probe_durations(global_t *global, const fat32ro_volume_t *vol,
         cin2_header_t header;
 
         durations[i][0] = '\0';
-        if (peek_cin2_header_fast(global, vol, &playable[i], header_sector, &header) == NULL
+        if (!playable[i].is_directory
+            && peek_cin2_header_fast(global, vol, &playable[i], header_sector, &header) == NULL
             && header.width == CINEMA_V2_WIDTH && header.height == CINEMA_V2_HEIGHT) {
             format_duration(durations[i], header.frame_count, header.fps_num, header.fps_den);
         }
@@ -498,6 +504,12 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
  * unset and the caller should fall back to raw detection -- that's the
  * one situation still ambiguous enough to plausibly be a raw v1/v2
  * whole-device image instead of a drive Cinema simply can't read. */
+/* first_cluster sentinel for the synthetic ".." entry prepended to a
+ * subfolder's listing: 0 is never a valid data cluster (real clusters
+ * start at 2), so it can't collide with a real directory. */
+#define BROWSER_UP_CLUSTER 0
+#define BROWSER_MAX_DEPTH  8
+
 static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool *played_ok)
 {
     fat32ro_volume_t vol;
@@ -505,8 +517,10 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
     static fat32ro_dirent_t playable[BROWSER_MAX_FILES];
     static fat32ro_extent_map_t movie_map;
     static char durations[BROWSER_MAX_FILES][8];
+    static uint32_t dir_stack[BROWSER_MAX_DEPTH];
     fat32ro_error_t mount_err;
-    int total_count, playable_count, i;
+    uint32_t current_dir;
+    int dir_depth = 0;
 
     mount_err = fat32ro_mount(&vol, fat_read_adapter, global);
     if (mount_err == FAT32RO_ERROR_NOT_FAT32) {
@@ -534,44 +548,76 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
         return true;
     }
 
-    total_count = fat32ro_list_root(&vol, entries, BROWSER_MAX_FILES);
-    if (total_count < 0) {
-        putstr("error reading FAT32 root directory");
-        *played_ok = false;
-        return true;
-    }
-
-    playable_count = 0;
-    for (i = 0; i < total_count && playable_count < BROWSER_MAX_FILES; ++i) {
-        if (has_playable_extension(entries[i].name)) {
-            playable[playable_count++] = entries[i];
-        }
-    }
-
-    if (playable_count == 0) {
-        os_ClrHome();
-        putstr("FAT32 drive detected");
-        putstr("No .bin/.cin movies found in the root folder");
-        *played_ok = false;
-        return true;
-    }
-
-    probe_durations(global, &vol, playable, playable_count, header_sector, durations);
-
-    /* Loops back to the browser after a movie ends, is exited early
-     * (Clear during playback), or fails to load/play -- only backing
-     * out of the browser itself (Clear there) or the drive genuinely
-     * going away actually leaves this function. A FAT32 drive can hold
-     * several movies (that's the whole point of this browser), so
-     * having to relaunch Cinema just to watch a second one would be a
-     * real gap. */
+    current_dir = vol.root_cluster;
     *played_ok = true;
+
+    /* Loops back to the browser -- in whichever folder is currently
+     * open -- after a movie ends, is exited early (Clear during
+     * playback), fails to load/play, or the user navigates up/down a
+     * folder. Only backing out of the browser at the root (Clear there)
+     * or the drive genuinely going away actually leaves this function. */
     for (;;) {
-        int choice = run_file_browser(global, &vol, playable, playable_count, durations,
-                                       header_sector, &movie_map);
+        int total_count, playable_count, i, choice;
+
+        total_count = fat32ro_list_directory(&vol, current_dir, entries, BROWSER_MAX_FILES);
+        if (total_count < 0) {
+            putstr("error reading FAT32 directory");
+            *played_ok = false;
+            return true;
+        }
+
+        playable_count = 0;
+        if (dir_depth > 0) {
+            /* Synthetic "go up" entry -- always first, so it's always
+             * reachable without scrolling regardless of how many real
+             * entries this folder has. */
+            strcpy(playable[playable_count].name, "..");
+            playable[playable_count].first_cluster = BROWSER_UP_CLUSTER;
+            playable[playable_count].file_size = 0;
+            playable[playable_count].is_directory = true;
+            playable_count++;
+        }
+        for (i = 0; i < total_count && playable_count < BROWSER_MAX_FILES; ++i) {
+            if (entries[i].is_directory || has_playable_extension(entries[i].name)) {
+                playable[playable_count++] = entries[i];
+            }
+        }
+
+        if (playable_count == 0) {
+            os_ClrHome();
+            putstr("FAT32 drive detected");
+            putstr("No .bin/.cin movies found in the root folder");
+            *played_ok = false;
+            return true;
+        }
+
+        probe_durations(global, &vol, playable, playable_count, header_sector, durations);
+
+        choice = run_file_browser(global, &vol, playable, playable_count, durations,
+                                   header_sector, &movie_map);
 
         if (choice < 0) {
-            return true; /* user backed out of the browser -- exit Cinema */
+            if (dir_depth > 0) {
+                current_dir = dir_stack[--dir_depth];
+                continue;
+            }
+            return true; /* backed out of the browser at the root -- exit Cinema */
+        }
+
+        if (playable[choice].first_cluster == BROWSER_UP_CLUSTER && playable[choice].is_directory) {
+            current_dir = dir_stack[--dir_depth];
+            continue;
+        }
+        if (playable[choice].is_directory) {
+            if (dir_depth < BROWSER_MAX_DEPTH) {
+                dir_stack[dir_depth++] = current_dir;
+                current_dir = playable[choice].first_cluster;
+            }
+            /* A folder nested deeper than BROWSER_MAX_DEPTH is simply
+             * not descended into -- reported nowhere specially, since
+             * pressing Enter on it just reopens the same listing, which
+             * is self-explanatory enough not to need its own message. */
+            continue;
         }
 
         play_fat_file(global, &vol, &playable[choice], header_sector, &movie_map, played_ok);

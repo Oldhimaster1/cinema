@@ -473,8 +473,16 @@ def parse_fps(value: str) -> Tuple[int, int]:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("video", type=Path, help="input video file (anything ffmpeg can decode)")
-    parser.add_argument("output", type=Path, help="output file to raw-copy to a USB drive")
+    parser.add_argument("video", type=Path,
+                         help="input video file (anything ffmpeg can decode), or a "
+                              "directory of them for batch mode (see --batch-ext)")
+    parser.add_argument("output", type=Path,
+                         help="output file to raw-copy to a USB drive, or an output "
+                              "directory in batch mode (one .bin per input, same "
+                              "basename) -- created if it doesn't exist")
+    parser.add_argument("--batch-ext", default=".mp4,.mkv,.mov,.avi,.webm,.m4v",
+                         help="comma-separated, case-insensitive extensions to pick up "
+                              "when `video` is a directory (default: %(default)s)")
     parser.add_argument("--fps", type=parse_fps, default=(15, 1),
                          help="target frame rate as N or N/D, e.g. 24 or 24000/1001 "
                               "(default: 15 -- at 15,360 bytes/frame this fits the "
@@ -495,8 +503,59 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if fps_num <= 0 or fps_den <= 0:
         parser.error("--fps must be positive")
 
+    if args.video.is_dir():
+        return batch_encode(args.video, args.output, args.batch_ext, fps_num, fps_den,
+                             args.palette_samples, args.start, args.duration, args.jobs)
+
     encode(args.video, args.output, fps_num, fps_den, args.palette_samples,
            args.start, args.duration, args.jobs)
+    return 0
+
+
+def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int, fps_den: int,
+                  palette_samples: int, start: Optional[float], duration: Optional[float],
+                  jobs: Optional[int]) -> int:
+    """Encodes every video file directly inside video_dir (not
+    recursive) whose extension matches ext_list into output_dir, one
+    .bin per input with the same basename. A single failing file (a
+    corrupt video, an unreadable codec, ...) is reported and skipped
+    rather than aborting the whole batch -- with more than a couple of
+    videos to convert, that's the difference between "97 succeeded, 3
+    need a look" and having to figure out which one file to remove
+    before starting over. Returns 0 if at least one file succeeded and
+    none failed, 1 if any failed (even if others succeeded), 2 if
+    nothing matched at all."""
+    extensions = {e.strip().lower() for e in ext_list.split(",") if e.strip()}
+    videos = sorted(
+        p for p in video_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in extensions
+    )
+
+    if not videos:
+        print(f"no video files (extensions: {', '.join(sorted(extensions))}) found in {video_dir}",
+              file=sys.stderr)
+        return 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    succeeded = []
+    failed = []
+    for video_path in videos:
+        out_path = output_dir / (video_path.stem + ".bin")
+        print(f"--- {video_path.name} -> {out_path.name} ---")
+        try:
+            encode(video_path, out_path, fps_num, fps_den, palette_samples,
+                   start, duration, jobs)
+            succeeded.append(video_path.name)
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not sink the batch
+            print(f"FAILED: {video_path.name}: {exc}", file=sys.stderr)
+            failed.append(video_path.name)
+
+    print(f"\nbatch complete: {len(succeeded)} succeeded, {len(failed)} failed"
+          f" (of {len(videos)} found)")
+    if failed:
+        print("failed: " + ", ".join(failed), file=sys.stderr)
+        return 1
     return 0
 
 

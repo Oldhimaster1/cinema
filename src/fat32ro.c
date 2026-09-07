@@ -269,7 +269,8 @@ static void format_short_name(const uint8_t *raw_entry, char *out)
     out[len] = '\0';
 }
 
-int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int max_entries)
+int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                            fat32ro_dirent_t *out, int max_entries)
 {
     uint32_t cluster;
     uint32_t steps = 0;
@@ -282,7 +283,7 @@ int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int ma
 
     fat_cache.sector = FAT32RO_NO_CACHED_SECTOR;
 
-    cluster = vol->root_cluster;
+    cluster = first_cluster;
     if (!cluster_is_valid_data_cluster(vol, cluster)) {
         return -(int)FAT32RO_ERROR_CLUSTER_CHAIN;
     }
@@ -315,15 +316,21 @@ int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int ma
                 if ((attr & 0x0F) == 0x0F) {
                     continue; /* long-filename fragment; unsupported by design */
                 }
-                if (attr & 0x18) { /* volume label (0x08) or directory (0x10) */
+                if (attr & 0x08) { /* volume label */
                     continue;
+                }
+                if (raw[0] == '.') {
+                    continue; /* "." / ".." pseudo-entries -- callers track their own way back up */
                 }
 
                 if (count < max_entries) {
+                    bool is_dir = (attr & 0x10) != 0;
+
                     format_short_name(raw, out[count].name);
                     out[count].first_cluster =
                         ((uint32_t)read_u16le(raw + 20) << 16) | read_u16le(raw + 26);
-                    out[count].file_size = read_u32le(raw + 28);
+                    out[count].file_size = is_dir ? 0 : read_u32le(raw + 28);
+                    out[count].is_directory = is_dir;
                     count++;
                 }
                 /* Past max_entries: keep scanning so end-of-directory /
@@ -354,6 +361,14 @@ int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int ma
             cluster = next;
         }
     }
+}
+
+int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int max_entries)
+{
+    if (vol == NULL) {
+        return -(int)FAT32RO_ERROR_INVALID_PARAM;
+    }
+    return fat32ro_list_directory(vol, vol->root_cluster, out, max_entries);
 }
 
 /* --- extent map ---------------------------------------------------------- */

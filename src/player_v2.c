@@ -4,6 +4,7 @@
 
 #include <fileioc.h>
 #include <graphx.h>
+#include <keypadc.h>
 #include <msddrvce.h>
 #include <tice.h>
 #include <usbdrvce.h>
@@ -48,6 +49,12 @@
 /* Seek step sizes, in seconds of movie time. */
 #define V2_SEEK_SMALL 10
 #define V2_SEEK_LARGE 60
+
+/* Hold-to-scrub timing: how long a seek key must be held before it
+ * starts repeating, and how often it repeats after that -- the usual
+ * "tap vs. hold" key-repeat feel, not a single big jump per tap. */
+#define V2_SCRUB_REPEAT_DELAY_TICKS    ((clock_t)(CLOCKS_PER_SEC / 2))
+#define V2_SCRUB_REPEAT_INTERVAL_TICKS ((clock_t)(CLOCKS_PER_SEC / 5))
 
 /* A frame's data normally comes from one contiguous run of sectors, but
  * when the movie is a file on a FAT32 drive (see src/fat32ro.h) rather
@@ -128,6 +135,15 @@ typedef struct {
     clock_t accumulated_pause_ticks;
     bool paused;
     bool loop_enabled;       /* toggled with [graph]; restarts from frame 0 at the end instead of stopping */
+    bool pause_after_render; /* one-shot: re-pause right after the next frame shows (frame-step) */
+
+    /* --- hold-to-scrub seeking (Left/Right/Up/Down), raw kb_Data-based
+     * since os_GetCSC() only ever reports one debounced press per
+     * physical press-and-release, with no way to tell "still held". A
+     * shared repeat timer across all four is fine -- holding more than
+     * one seek direction at once isn't a real use case. */
+    bool scrub_left_held, scrub_right_held, scrub_up_held, scrub_down_held;
+    clock_t next_scrub_tick;
 
     uint32_t dropped_frames;
     uint32_t repeated_frames;
@@ -573,21 +589,23 @@ static void draw_osd(player_v2_t *player)
     format_timecode(total, player->frame_count, player->fps_num, player->fps_den);
 
     if (player->paused) {
-        sprintf(line, "PAUSED  %s/%s%s", position, total,
-                player->loop_enabled ? "  LOOP" : "");
+        sprintf(line, "PAUSED  %s/%s%s  B%u", position, total,
+                player->loop_enabled ? "  LOOP" : "",
+                (unsigned)boot_GetBatteryStatus());
     } else {
         uint32_t decode_ms = player->decode_samples
             ? (uint32_t)(((uint64_t)player->decode_ticks_total * 1000u)
                           / ((uint64_t)player->decode_samples * CLOCKS_PER_SEC))
             : 0u;
 
-        sprintf(line, "%s/%s  %lu.%luFPS  DEC%lums  DR%lu%s",
+        sprintf(line, "%s/%s  %lu.%luFPS  DEC%lums  DR%lu%s  B%u",
                 position, total,
                 (unsigned long)(player->fps_tenths / 10u),
                 (unsigned long)(player->fps_tenths % 10u),
                 (unsigned long)decode_ms,
                 (unsigned long)player->dropped_frames,
-                player->loop_enabled ? "  LOOP" : "");
+                player->loop_enabled ? "  LOOP" : "",
+                (unsigned)boot_GetBatteryStatus());
     }
 
     gfx_SetTextFGColor(player->osd_fg);
@@ -721,6 +739,36 @@ static bool player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
         return player_seek_to_frame(player, target >= player->frame_count
             ? player->frame_count - 1 : (uint32_t)target);
     }
+}
+
+/* One seek key's hold-to-scrub state machine: fires an immediate step
+ * on the down-edge (tap behavior, matching a single discrete press),
+ * then repeats at V2_SCRUB_REPEAT_INTERVAL_TICKS once held past
+ * V2_SCRUB_REPEAT_DELAY_TICKS. *held tracks this one key's previous raw
+ * state across calls; player->next_scrub_tick is shared across all four
+ * directions (see its declaration for why that's fine). Returns false
+ * only on a fatal seek error, matching player_seek_seconds. */
+static bool handle_scrub_key(player_v2_t *player, bool down, bool *held,
+                               clock_t now, int32_t step_seconds)
+{
+    bool edge = down && !*held;
+    *held = down;
+
+    if (edge) {
+        if (!player_seek_seconds(player, step_seconds)) {
+            return false;
+        }
+        player->next_scrub_tick = now + V2_SCRUB_REPEAT_DELAY_TICKS;
+        osd_poke(player);
+    } else if (down && (clock_t)(now - player->next_scrub_tick) >= 0) {
+        if (!player_seek_seconds(player, step_seconds)) {
+            return false;
+        }
+        player->next_scrub_tick = now + V2_SCRUB_REPEAT_INTERVAL_TICKS;
+        osd_poke(player);
+    }
+
+    return true;
 }
 
 static void render_frame(player_v2_t *player, frame_slot_t *slot)
@@ -931,26 +979,13 @@ static bool player_v2_loop(player_v2_t *player)
                 }
                 break;
 
-            case sk_Left:
-                if (!player_seek_seconds(player, -V2_SEEK_SMALL)) {
-                    return false;
-                }
-                break;
-            case sk_Right:
-                if (!player_seek_seconds(player, V2_SEEK_SMALL)) {
-                    return false;
-                }
-                break;
-            case sk_Down:
-                if (!player_seek_seconds(player, -V2_SEEK_LARGE)) {
-                    return false;
-                }
-                break;
-            case sk_Up:
-                if (!player_seek_seconds(player, V2_SEEK_LARGE)) {
-                    return false;
-                }
-                break;
+            /* Left/Right/Up/Down deliberately have no case here anymore
+             * -- os_GetCSC() only reports one debounced press per
+             * physical press-and-release, with no way to tell "still
+             * held", so hold-to-scrub is handled separately below via
+             * raw kb_Data state instead. That path also covers a plain
+             * tap (an immediate step on the down-edge), so removing
+             * these cases doesn't lose single-tap seeking. */
 
             case sk_0:
                 if (!player_seek_to_frame(player, 0)) {
@@ -973,8 +1008,55 @@ static bool player_v2_loop(player_v2_t *player)
                 player->loop_enabled = !player->loop_enabled;
                 break;
 
+            case sk_Window: /* frame-step forward, only while paused */
+                if (player->paused && player->has_presented
+                    && player->last_frame_presented + 1 < player->frame_count) {
+                    player->pause_after_render = true;
+                    if (!player_seek_to_frame(player, player->last_frame_presented + 1)) {
+                        return false;
+                    }
+                }
+                break;
+
+            case sk_Yequ: /* frame-step backward, only while paused */
+                if (player->paused && player->has_presented
+                    && player->last_frame_presented > 0) {
+                    player->pause_after_render = true;
+                    if (!player_seek_to_frame(player, player->last_frame_presented - 1)) {
+                        return false;
+                    }
+                }
+                break;
+
             default:
                 break;
+        }
+
+        /* Hold-to-scrub: raw keypad state (not os_GetCSC(), which can't
+         * report "still held"), checked every iteration regardless of
+         * what os_GetCSC() saw above. Runs whether or not paused --
+         * seeking has always resumed playback (see player_seek_to_frame),
+         * and that's unchanged here. */
+        {
+            clock_t now = clock();
+
+            kb_Scan();
+            if (!handle_scrub_key(player, (kb_Data[7] & kb_Right) != 0,
+                                    &player->scrub_right_held, now, V2_SEEK_SMALL)) {
+                return false;
+            }
+            if (!handle_scrub_key(player, (kb_Data[7] & kb_Left) != 0,
+                                    &player->scrub_left_held, now, -V2_SEEK_SMALL)) {
+                return false;
+            }
+            if (!handle_scrub_key(player, (kb_Data[7] & kb_Up) != 0,
+                                    &player->scrub_up_held, now, V2_SEEK_LARGE)) {
+                return false;
+            }
+            if (!handle_scrub_key(player, (kb_Data[7] & kb_Down) != 0,
+                                    &player->scrub_down_held, now, -V2_SEEK_LARGE)) {
+                return false;
+            }
         }
 
         if (player->paused) {
@@ -1023,6 +1105,20 @@ static bool player_v2_loop(player_v2_t *player)
                 player->last_frame_presented = slot->frame_number;
                 player->last_progress_tick = clock();
                 slot->state = SLOT_EMPTY;
+
+                if (player->pause_after_render) {
+                    /* A paused frame-step (sk_Window/sk_Yequ): the seek
+                     * that got us this frame always resumes playback
+                     * (see player_seek_to_frame), so undo that here, now
+                     * that the stepped-to frame has actually been drawn.
+                     * Skipping playback_finished below is deliberate --
+                     * stepping onto the last frame while paused should
+                     * just sit there, not trigger end-of-movie/looping. */
+                    player->pause_after_render = false;
+                    player->paused = true;
+                    player->pause_tick = clock();
+                    continue;
+                }
 
                 if (playback_finished(player)) {
                     if (!player->loop_enabled) {
@@ -1103,6 +1199,13 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     ok = prefill_frames(&player);
 
     if (ok) {
+        /* A movie can easily run longer than TI-OS's idle auto-power-
+         * down timer, which only resets on a keypress -- watching one
+         * without touching a key for 5+ minutes would otherwise get cut
+         * off mid-playback. Re-enabled below regardless of how the loop
+         * exits. */
+        os_DisableAPD();
+
         gfx_Begin();
         graphics_active = true;
         gfx_SetPalette(header->palette, sizeof(header->palette), 0);
@@ -1115,10 +1218,13 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
 
         player.start_tick = clock();
         player.fps_window_start = player.start_tick;
+        player.last_progress_tick = player.start_tick;
         /* Surface the controls/scrubber briefly on start, the way a
          * video player does, then let it auto-hide. */
         osd_poke(&player);
         ok = player_v2_loop(&player);
+
+        os_EnableAPD();
     }
 
     if (graphics_active) {

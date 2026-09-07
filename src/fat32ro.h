@@ -100,16 +100,22 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
 typedef struct {
     char name[FAT32RO_MAX_NAME]; /* reconstructed "NAME.EXT", trailing spaces trimmed */
     uint32_t first_cluster;
-    uint32_t file_size;
+    uint32_t file_size;    /* 0 for directories -- FAT32 doesn't size them */
+    bool is_directory;
 } fat32ro_dirent_t;
 
-/* Lists up to max_entries plain files (not directories, volume labels,
- * or LFN fragments) from the root directory into out[], returning the
- * count found (which may be less than what actually exists if the
- * directory has more than max_entries qualifying files -- callers that
- * care should size their array generously; this is a simple flat
- * browser, not a paged one). Returns a negative fat32ro_error_t on
- * failure (e.g. a corrupt directory chain), 0 or more on success. */
+/* Lists up to max_entries files and subdirectories (not volume labels,
+ * "."/".." pseudo-entries, or LFN fragments) from first_cluster's
+ * directory into out[], returning the count found (which may be less
+ * than what actually exists if the directory has more than max_entries
+ * qualifying entries -- callers that care should size their array
+ * generously; this is a simple flat browser, not a paged one). Returns
+ * a negative fat32ro_error_t on failure (e.g. a corrupt directory
+ * chain), 0 or more on success. */
+int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                            fat32ro_dirent_t *out, int max_entries);
+
+/* fat32ro_list_directory(vol, vol->root_cluster, out, max_entries). */
 int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int max_entries);
 
 typedef struct {
