@@ -38,6 +38,61 @@
 #define CINEMA_RENDERER CINEMA_RENDERER_GRAPHX
 #endif
 
+/* Routing-proof instrumentation: a physical test that read "benchmark"
+ * numbers off the wrong .8xp (CINEMA_RENDER_FIXED_ASM.8xp instead of
+ * CINEMA_RENDBNCH_FIXED_ASM.8xp, say -- an easy mistake with six
+ * similarly-named artifacts) can look exactly like a renderer-selection
+ * bug from the numbers alone. These make it checkable on screen instead
+ * of inferred: every renderer -- including the GraphX control, via the
+ * render_scaled_graphx() wrapper below, since gfx_ScaledSprite_NoClip
+ * itself is OS library code that can't be instrumented directly --
+ * calls record_render_call() with its own fixed ID as the very first
+ * thing it does. Display CINEMA_RENDERER_ACTIVE_NAME and
+ * g_render_calls[CINEMA_RENDERER_ACTIVE_ID] on screen (see
+ * bench/src/main.c and player_v2.c's OSD) and there is no more room for
+ * "which binary was actually running" doubt: the active renderer's
+ * counter must equal the number of frames rendered, and both others
+ * must read zero. */
+#define CINEMA_RENDERER_ID_GRAPHX    1
+#define CINEMA_RENDERER_ID_FIXED_C   2
+#define CINEMA_RENDERER_ID_FIXED_ASM 3
+
+#if CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
+#define CINEMA_RENDERER_ACTIVE_ID   CINEMA_RENDERER_ID_FIXED_C
+#define CINEMA_RENDERER_ACTIVE_NAME "FIXED_C"
+#elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
+#define CINEMA_RENDERER_ACTIVE_ID   CINEMA_RENDERER_ID_FIXED_ASM
+#define CINEMA_RENDERER_ACTIVE_NAME "FIXED_ASM"
+#else
+#define CINEMA_RENDERER_ACTIVE_ID   CINEMA_RENDERER_ID_GRAPHX
+#define CINEMA_RENDERER_ACTIVE_NAME "GRAPHX"
+#endif
+
+/* File-scope forward declaration, deliberately separate from its use in
+ * render_scaled_graphx()'s parameter list below: a struct tag mentioned
+ * for the first time *inside* a parameter list gets C's "prototype
+ * scope" instead of file scope, making it invisible (and a *different*,
+ * conflicting type) everywhere else -- including render_v2.c's own
+ * definition of that same function, which failed to compile against
+ * this header for exactly that reason before this line was added. */
+struct gfx_sprite_t;
+
+/* Index 0 unused (IDs start at 1) so an uninitialized/wrong ID of 0
+ * can't alias a real counter. volatile: these exist to be *read*, by a
+ * human, off a screen the compiler has no way to know that -- without
+ * volatile there would be nothing stopping the optimizer from treating
+ * an increment as dead and removing it. */
+extern volatile unsigned long g_render_calls[4];
+
+void record_render_call(int renderer_id);
+
+/* Wraps gfx_ScaledSprite_NoClip with the same record_render_call() this
+ * header's other renderers use, so the GraphX path is provable the same
+ * way -- see the routing-proof comment above for why this can't be done
+ * inside gfx_ScaledSprite_NoClip itself. Same contract as
+ * render_scaled_fixed_c below re: what sprite must point to. */
+void render_scaled_graphx(const struct gfx_sprite_t *sprite);
+
 /* Fixed 160x96 (one 8bpp palette-index byte per pixel, see
  * CINEMA_V2_WIDTH/HEIGHT) -> 320x192 2x nearest-neighbor scale-up,
  * drawn at destination (0, 24) into GraphX's *current* draw buffer

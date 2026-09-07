@@ -80,7 +80,7 @@ int main(void)
 
     start = clock();
     for (i = 0; i < BENCH_ITERATIONS; ++i) {
-        gfx_ScaledSprite_NoClip(sprite, 0, 24, 2, 2);
+        render_scaled_graphx((const struct gfx_sprite_t *)sprite);
     }
     graphx_ticks = clock() - start;
 
@@ -105,26 +105,43 @@ int main(void)
     sprintf(line, "iterations: %d", BENCH_ITERATIONS);
     print_line(1, line);
 
-    sprintf(line, "graphx total ticks: %lu", (unsigned long)graphx_ticks);
+    /* Routing proof (see render_v2.h): print which renderer this binary
+     * was built with and how many times ITS OWN counter -- incremented
+     * inside the renderer function itself, not inferred -- actually
+     * fired. Must read BENCH_ITERATIONS for the active renderer and 0
+     * for both others, or something upstream (wrong artifact run, wrong
+     * build) is not what it looks like. */
+    sprintf(line, "renderer: %s (id %d)", CINEMA_RENDERER_ACTIVE_NAME,
+            CINEMA_RENDERER_ACTIVE_ID);
     print_line(2, line);
+    sprintf(line, "calls graphx=%lu fixedc=%lu asm=%lu",
+            (unsigned long)g_render_calls[CINEMA_RENDERER_ID_GRAPHX],
+            (unsigned long)g_render_calls[CINEMA_RENDERER_ID_FIXED_C],
+            (unsigned long)g_render_calls[CINEMA_RENDERER_ID_FIXED_ASM]);
+    print_line(3, line);
+    sprintf(line, "(active renderer's count should = %d)", BENCH_ITERATIONS);
+    print_line(4, line);
+
+    sprintf(line, "graphx total ticks: %lu", (unsigned long)graphx_ticks);
+    print_line(5, line);
     sprintf(line, "graphx avg us: %lu",
             (unsigned long)(((uint64_t)graphx_ticks * 1000000u)
                              / ((uint64_t)BENCH_ITERATIONS * CLOCKS_PER_SEC)));
-    print_line(3, line);
+    print_line(6, line);
 
 #if CINEMA_RENDERER != CINEMA_RENDERER_GRAPHX
     sprintf(line, "candidate total ticks: %lu", (unsigned long)candidate_ticks);
-    print_line(4, line);
+    print_line(7, line);
     sprintf(line, "candidate avg us: %lu",
             (unsigned long)(((uint64_t)candidate_ticks * 1000000u)
                              / ((uint64_t)BENCH_ITERATIONS * CLOCKS_PER_SEC)));
-    print_line(5, line);
+    print_line(8, line);
 #else
-    print_line(4, "(graphx-only build --");
-    print_line(5, " no candidate to compare)");
+    print_line(7, "(graphx-only build --");
+    print_line(8, " no candidate to compare)");
 #endif
 
-    print_line(7, "press any key to exit");
+    print_line(10, "press any key to exit");
     gfx_SwapDraw();
 
     wait_for_key();

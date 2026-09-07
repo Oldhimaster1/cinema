@@ -15,6 +15,13 @@
  * actual storage itself. */
 uint8_t gfx_vram_stub[GFX_LCD_HEIGHT][GFX_LCD_WIDTH];
 
+/* render_v2.c's render_scaled_graphx() wrapper calls this; this test
+ * never exercises that path (only render_scaled_fixed_c's pixels), but
+ * render_v2.c still needs the symbol to link. */
+void gfx_ScaledSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x,
+                              uint8_t y, uint8_t width_scale, uint8_t height_scale)
+{ (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale; }
+
 static int g_failures = 0;
 #define CHECK(cond, msg) \
     do { \

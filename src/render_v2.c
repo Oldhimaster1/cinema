@@ -3,6 +3,25 @@
 
 #include <graphx.h>
 
+volatile unsigned long g_render_calls[4];
+
+void record_render_call(int renderer_id)
+{
+    g_render_calls[renderer_id]++;
+}
+
+/* See render_v2.h's routing-proof comment for why this wrapper exists:
+ * gfx_ScaledSprite_NoClip is OS library code (see the renderer phase's
+ * report -- graphx.lib is a jump-table manifest, not code this project
+ * can instrument), so this is the closest equivalent to "instrumented
+ * inside the renderer function" available for the GraphX path. */
+void render_scaled_graphx(const struct gfx_sprite_t *sprite)
+{
+    record_render_call(CINEMA_RENDERER_ID_GRAPHX);
+    gfx_ScaledSprite_NoClip((const gfx_sprite_t *)sprite, 0,
+                             (GFX_LCD_HEIGHT - CINEMA_V2_DEST_HEIGHT) / 2, 2, 2);
+}
+
 /* Cinema always scales exactly one fixed thing: a CINEMA_V2_WIDTH x
  * CINEMA_V2_HEIGHT (160x96), one-byte-per-pixel (palette index) frame,
  * 2x nearest-neighbor to 320x192, at destination (0, 24), into whichever
@@ -75,54 +94,78 @@
 /* Duplicates s[i] into out[2*i] and out[2*i+1]. A macro (not a helper
  * function) so the 16 calls below are genuinely 16 separate, inlined
  * load/store pairs in the generated code, not a call in a loop. */
-#define RENDER_DUP2(i) \
+/* Reads one source byte and writes it into both destination rows (two
+ * bytes each, four writes total) before advancing all three pointers. A
+ * macro, not a helper, so the 16 calls below are genuinely inlined,
+ * independent steps.
+ *
+ * This replaced an earlier version that (per the renderer phase's
+ * design notes) read each compact source row *twice* -- once while
+ * writing destination row 1, once again while writing destination row
+ * 2 -- specifically to avoid reading the just-written destination row
+ * back out of (possibly slower) video memory. That's still avoided
+ * here: this never reads any destination byte, ever, from either row.
+ * It also does something the two-pass version didn't: write both
+ * destination rows from the *same* source read instead of visiting
+ * every source byte twice. Disassembling the two-pass version showed
+ * why that mattered here -- 66 push + 66 pop instructions in its
+ * 16-pixel block (confirmed by a real compile with the toolchain),
+ * because keeping two pointers (source, one destination row) live for
+ * indexed/incremented access needs an offset-addressable register each,
+ * and eZ80 only has one spare (iy; ix is the frame pointer), forcing
+ * constant swapping. Three pointers here (source, row-1 dest, row-2
+ * dest) still fit without any of that: none of them need offset
+ * addressing, just plain sequential register-pair access (hl/de/bc),
+ * which eZ80 has three of. Confirmed by disassembling this version:
+ * zero push/pop in the block body (see render_v2.c's phase report for
+ * the exact before/after instruction counts) -- changing the algorithm
+ * shape, not just the C spelling of the same one, is what actually
+ * removed the register-shuffling cost the first version paid. */
+#define RENDER_DUP2ROWS() \
     do { \
-        unsigned char p_ = s[i]; \
-        out[(i) * 2] = p_; \
-        out[(i) * 2 + 1] = p_; \
+        unsigned char p_ = *s++; \
+        *out0++ = p_; \
+        *out0++ = p_; \
+        *out1++ = p_; \
+        *out1++ = p_; \
     } while (0)
 
 /* Expands exactly RENDER_UNROLL (16) source bytes starting at s into
- * 2*RENDER_UNROLL (32) destination bytes starting at out. Caller
- * advances s by RENDER_UNROLL and out by 2*RENDER_UNROLL between calls. */
-static void expand_block16(const unsigned char *s, unsigned char *out)
+ * 2*RENDER_UNROLL (32) bytes in *each* of two destination rows starting
+ * at out0/out1. s, out0, out1 are local copies (passed by value); the
+ * caller advances its own copies by RENDER_UNROLL / 2*RENDER_UNROLL
+ * between calls independently. */
+static void expand_block16_both_rows(const unsigned char *s,
+                                       unsigned char *out0, unsigned char *out1)
 {
-    RENDER_DUP2(0);  RENDER_DUP2(1);  RENDER_DUP2(2);  RENDER_DUP2(3);
-    RENDER_DUP2(4);  RENDER_DUP2(5);  RENDER_DUP2(6);  RENDER_DUP2(7);
-    RENDER_DUP2(8);  RENDER_DUP2(9);  RENDER_DUP2(10); RENDER_DUP2(11);
-    RENDER_DUP2(12); RENDER_DUP2(13); RENDER_DUP2(14); RENDER_DUP2(15);
+    RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS();
+    RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS();
+    RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS();
+    RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS(); RENDER_DUP2ROWS();
 }
 
 void render_scaled_fixed_c(const unsigned char *src)
 {
     const unsigned char *row = src;
+    record_render_call(CINEMA_RENDERER_ID_FIXED_C);
     unsigned char *d0 = (unsigned char *)gfx_vbuffer
         + (unsigned)RENDER_DST_Y_OFFSET * RENDER_DST_STRIDE;
-    unsigned char *d1 = d0 + RENDER_DST_STRIDE;
     unsigned y;
 
     for (y = 0; y < RENDER_SRC_H; ++y) {
         unsigned block;
         const unsigned char *s = row;
-        unsigned char *out = d0;
+        unsigned char *out0 = d0;
+        unsigned char *out1 = d0 + RENDER_DST_STRIDE;
 
         for (block = 0; block < RENDER_SRC_W / RENDER_UNROLL; ++block) {
-            expand_block16(s, out);
+            expand_block16_both_rows(s, out0, out1);
             s += RENDER_UNROLL;
-            out += RENDER_UNROLL * 2;
-        }
-
-        s = row; /* re-read the compact source row -- see header comment
-                     above -- instead of reading d0 back. */
-        out = d1;
-        for (block = 0; block < RENDER_SRC_W / RENDER_UNROLL; ++block) {
-            expand_block16(s, out);
-            s += RENDER_UNROLL;
-            out += RENDER_UNROLL * 2;
+            out0 += RENDER_UNROLL * 2;
+            out1 += RENDER_UNROLL * 2;
         }
 
         row += RENDER_SRC_W;
         d0 += 2u * RENDER_DST_STRIDE;
-        d1 += 2u * RENDER_DST_STRIDE;
     }
 }

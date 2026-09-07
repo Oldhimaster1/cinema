@@ -52,7 +52,7 @@ Linker script and memory map
                 0x00d1a994                ___exithl
                 0x00d1a995                _exit.sp
 
-.text           0x00d1a9d0     0x3b2d
+.text           0x00d1a9d0     0x3c95
  *(.text.unlikely .text.*_unlikely .text.unlikely.*)
  *(.text.exit .text.exit.*)
  *(.text.startup .text.startup.*)
@@ -99,105 +99,116 @@ Linker script and memory map
                 0x00d1ae4e                __ixor
                 0x00d1ae65                _clock
                 0x00d1ae70                _atomic_load_increasing_32
- .text._main    0x00d1ae95     0x19f3 obj/RENDBNCH.o
+ .text._main    0x00d1ae95     0x1b58 obj/RENDBNCH.o
                 0x00d1ae95                _main
  .text._render_scaled_fixed_asm
-                0x00d1c888      0x2ad obj/RENDBNCH.o
-                0x00d1c888                _render_scaled_fixed_asm
+                0x00d1c9ed      0x2b0 obj/RENDBNCH.o
+                0x00d1c9ed                _render_scaled_fixed_asm
  .text._npf_vpprintf
-                0x00d1cb35     0x1775 obj/RENDBNCH.o
-                0x00d1cb35                _npf_vpprintf
+                0x00d1cc9d     0x1775 obj/RENDBNCH.o
+                0x00d1cc9d                _npf_vpprintf
  .text._NPF_PUTC_IMPL
-                0x00d1e2aa       0x2d obj/RENDBNCH.o
+                0x00d1e412       0x2d obj/RENDBNCH.o
  .text._npf_utoa_rev
-                0x00d1e2d7       0xe6 obj/RENDBNCH.o
+                0x00d1e43f       0xe6 obj/RENDBNCH.o
  .text._vsnprintf
-                0x00d1e3bd       0x88 obj/RENDBNCH.o
-                0x00d1e3bd                _vsnprintf
+                0x00d1e525       0x88 obj/RENDBNCH.o
+                0x00d1e525                _vsnprintf
  .text._npf_bufputc
-                0x00d1e445       0x25 obj/RENDBNCH.o
+                0x00d1e5ad       0x25 obj/RENDBNCH.o
  .text._npf_bufputc_nop
-                0x00d1e46a        0x7 obj/RENDBNCH.o
+                0x00d1e5d2        0x7 obj/RENDBNCH.o
  .text._sprintf
-                0x00d1e471       0x29 obj/RENDBNCH.o
-                0x00d1e471                _sprintf
- .text.__bctlz  0x00d1e49a       0x22 obj/RENDBNCH.o
-                0x00d1e49a                __bctlz
- .text.__sctlz  0x00d1e4bc        0xc obj/RENDBNCH.o
-                0x00d1e4bc                __sctlz
- .text.__ictlz  0x00d1e4c8       0x12 obj/RENDBNCH.o
-                0x00d1e4c8                __ictlz
+                0x00d1e5d9       0x29 obj/RENDBNCH.o
+                0x00d1e5d9                _sprintf
+ .text.__bctlz  0x00d1e602       0x22 obj/RENDBNCH.o
+                0x00d1e602                __bctlz
+ .text.__sctlz  0x00d1e624        0xc obj/RENDBNCH.o
+                0x00d1e624                __sctlz
+ .text.__ictlz  0x00d1e630       0x12 obj/RENDBNCH.o
+                0x00d1e630                __ictlz
  .text.__llctlz
-                0x00d1e4da        0xe obj/RENDBNCH.o
-                0x00d1e4da                __llctlz
+                0x00d1e642        0xe obj/RENDBNCH.o
+                0x00d1e642                __llctlz
  .text.__i48ctlz
-                0x00d1e4e8       0x15 obj/RENDBNCH.o
-                0x00d1e4e8                __i48ctlz
+                0x00d1e650       0x15 obj/RENDBNCH.o
+                0x00d1e650                __i48ctlz
  *(.gnu.warning)
 
-.rodata         0x00d1e4fd      0x1e5
+.rodata         0x00d1e665      0x24e
  *(.rodata .rodata.* .gnu.linkonce.r.*)
- .rodata._.str  0x00d1e4fd       0x1e obj/RENDBNCH.o
+ .rodata._.str  0x00d1e665       0x1e obj/RENDBNCH.o
  .rodata._.str.1
-                0x00d1e51b       0x1e obj/RENDBNCH.o
+                0x00d1e683       0x1e obj/RENDBNCH.o
  .rodata._.str.2
-                0x00d1e539       0x13 obj/RENDBNCH.o
+                0x00d1e6a1       0x13 obj/RENDBNCH.o
  .rodata._.str.3
-                0x00d1e54c       0x18 obj/RENDBNCH.o
+                0x00d1e6b4       0x15 obj/RENDBNCH.o
  .rodata._.str.4
-                0x00d1e564       0x13 obj/RENDBNCH.o
+                0x00d1e6c9        0xa obj/RENDBNCH.o
  .rodata._.str.5
-                0x00d1e577       0x1b obj/RENDBNCH.o
+                0x00d1e6d3       0x24 obj/RENDBNCH.o
  .rodata._.str.6
-                0x00d1e592       0x16 obj/RENDBNCH.o
+                0x00d1e6f7       0x26 obj/RENDBNCH.o
  .rodata._.str.7
-                0x00d1e5a8       0x16 obj/RENDBNCH.o
+                0x00d1e71d       0x18 obj/RENDBNCH.o
+ .rodata._.str.8
+                0x00d1e735       0x13 obj/RENDBNCH.o
+ .rodata._.str.9
+                0x00d1e748       0x1b obj/RENDBNCH.o
+ .rodata._.str.10
+                0x00d1e763       0x16 obj/RENDBNCH.o
+ .rodata._.str.11
+                0x00d1e779       0x16 obj/RENDBNCH.o
  .rodata._npf_vpprintf
-                0x00d1e5be      0x102 obj/RENDBNCH.o
+                0x00d1e78f      0x102 obj/RENDBNCH.o
  .rodata.libload
-                0x00d1e6c0       0x22 obj/crt0.o
+                0x00d1e891       0x22 obj/crt0.o
 
-.init_array     0x00d1e6e2        0x0
+.init_array     0x00d1e8b3        0x0
                 [!provide]                        PROVIDE (__init_array_start = .)
  *(.preinit_array)
  *(SORT_BY_INIT_PRIORITY(.init_array.*))
  *(.init_array)
                 [!provide]                        PROVIDE (__init_array_end = .)
 
-.fini_array     0x00d1e6e2        0x0
+.fini_array     0x00d1e8b3        0x0
                 [!provide]                        PROVIDE (__fini_array_start = .)
  *(SORT_BY_INIT_PRIORITY(.fini_array.*))
  *(.fini_array)
                 [!provide]                        PROVIDE (__fini_array_end = .)
-                0x00d1e6e2                        ___data_low = .
+                0x00d1e8b3                        ___data_low = .
 
-.data           0x00d1e6e2        0x0
+.data           0x00d1e8b3        0x0
  *(.data .data.* .gnu.linkonce.d.*)
  *(.data1)
-                0x00d1e6e2                        ___runprgm_reloc_start = .
+                0x00d1e8b3                        ___runprgm_reloc_start = .
  *(.runprgm.reloc)
-                0x00d1e6e2                        ___runprgm_reloc_end = .
-                0x00d1e6e2                        ___data_high = .
+                0x00d1e8b3                        ___runprgm_reloc_end = .
+                0x00d1e8b3                        ___data_high = .
                 0x00000000                        ___data_len = (___data_high - ___data_low)
                 0x00d052c6                        . = BSSHEAP_LOW
                 0x00d052c6                        ___bss_low = .
 
-.bss            0x00d052c6     0x3c0b
+.bss            0x00d052c6     0x3c1b
  *(.dynbss)
  *(.bss .bss.* .gnu.linkonce.b.*)
  .bss._g_test_sprite
                 0x00d052c6     0x3c02 obj/RENDBNCH.o
+ .bss._g_render_calls
+                0x00d08ec8       0x10 obj/RENDBNCH.o
+                0x00d08ec8                _g_render_calls
  .bss._pc_cnt.0
-                0x00d08ec8        0x3 obj/RENDBNCH.o
+                0x00d08ed8        0x3 obj/RENDBNCH.o
  .bss._pc_cnt.1
-                0x00d08ecb        0x3 obj/RENDBNCH.o
+                0x00d08edb        0x3 obj/RENDBNCH.o
  .bss._pc_cnt.2
-                0x00d08ece        0x3 obj/RENDBNCH.o
+                0x00d08ede        0x3 obj/RENDBNCH.o
  *(COMMON)
-                0x00d08ed1                        ___bss_high = .
-                0x00003c0b                        ___bss_len = (___bss_high - ___bss_low)
+                0x00d08ee1                        ___bss_high = .
+                0x00003c1b                        ___bss_len = (___bss_high - ___bss_low)
                 0x00000001                        ASSERT ((. <= BSSHEAP_HIGH), Error: BSS exceed BSSHEAP_HIGH limit)
-                0x00d08ed1                        ___heap_low = .
+                0x00d08ee1                        ___heap_low = .
                 0x00d13fd8                        . = BSSHEAP_HIGH
                 0x00d13fd8                        ___heap_high = .
 

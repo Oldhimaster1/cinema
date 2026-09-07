@@ -732,7 +732,7 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
 #elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
     render_scaled_fixed_asm(slot_sprite(slot)->data);
 #else
-    gfx_ScaledSprite_NoClip(slot_sprite(slot), 0, V2_Y_OFFSET, 2, 2);
+    render_scaled_graphx((const struct gfx_sprite_t *)slot_sprite(slot));
 #endif
 
     /* "decode" is a bit of a misnomer now (there's nothing left to
@@ -842,6 +842,15 @@ static void save_resume_state(const player_v2_t *player)
 static void print_playback_summary(const player_v2_t *player)
 {
     char buffer[64];
+
+    /* Routing proof: which renderer actually ran, and how many times it
+     * (specifically -- see render_v2.h's routing-proof comment) was
+     * called, printed unconditionally so a physical test never has to
+     * infer this from timing numbers alone. */
+    sprintf(buffer, "renderer: %s (id %d) calls: %lu", CINEMA_RENDERER_ACTIVE_NAME,
+            CINEMA_RENDERER_ACTIVE_ID,
+            (unsigned long)g_render_calls[CINEMA_RENDERER_ACTIVE_ID]);
+    putstr(buffer);
 
     sprintf(buffer, "frames shown: %lu", (unsigned long)(player->has_presented
         ? player->last_frame_presented + 1 : 0));
