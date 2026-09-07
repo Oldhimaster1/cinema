@@ -47,34 +47,13 @@ bool fat32ro_first_sector_lba(const fat32ro_volume_t *vol, uint32_t first_cluste
  * per-command overhead that walking a several-thousand-cluster file this
  * way can take a very long time even though the file is one contiguous
  * run. This cache lets a walk reuse the last sector it fetched instead
- * of re-reading it once per cluster.
- *
- * A fragmented file breaks that single-sector reuse: each fragment's
- * next cluster can land in a different FAT sector, back to one device
- * read per fragment. Buffering several consecutive FAT sectors per fill
- * (not just the one actually needed) means nearby fragments -- the
- * common case, since a drive tends to hand out clusters from roughly the
- * same region rather than scattering them across the whole FAT -- are
- * served from RAM instead of costing another round trip. */
+ * of re-reading it once per cluster. */
 #define FAT32RO_NO_CACHED_SECTOR 0xFFFFFFFFu
-/* Bounded by the calculator's very limited free RAM (BSS), not by any
- * benefit ceiling -- bigger would batch more but there isn't room to
- * spare for it here. */
-#define FAT_CACHE_SECTORS 4
 
 typedef struct {
-    uint32_t base_sector; /* first absolute LBA buffered, or FAT32RO_NO_CACHED_SECTOR */
-    uint32_t sectors_buffered;
-    uint8_t buf[FAT32RO_SECTOR_BYTES * FAT_CACHE_SECTORS];
+    uint32_t sector; /* absolute LBA currently buffered, or FAT32RO_NO_CACHED_SECTOR */
+    uint8_t buf[FAT32RO_SECTOR_BYTES];
 } fat_cache_t;
-
-/* One shared instance rather than one per caller: fat32ro_list_directory
- * and fat32ro_build_extent_map never call each other or run
- * concurrently, and at FAT_CACHE_SECTORS sectors each instance is too
- * large to duplicate on this device's tiny BSS budget. Each caller
- * re-initializes it (base_sector = FAT32RO_NO_CACHED_SECTOR) before use,
- * so there's no stale-state risk from sharing it. */
-static fat_cache_t g_fat_cache;
 
 static fat32ro_error_t read_fat_entry(const fat32ro_volume_t *vol, uint32_t cluster,
                                        fat_cache_t *cache, uint32_t *out_next)
@@ -83,35 +62,14 @@ static fat32ro_error_t read_fat_entry(const fat32ro_volume_t *vol, uint32_t clus
     uint32_t fat_sector = vol->first_fat_sector + fat_offset / FAT32RO_SECTOR_BYTES;
     uint32_t entry_offset = fat_offset % FAT32RO_SECTOR_BYTES;
 
-    if (cache->base_sector == FAT32RO_NO_CACHED_SECTOR
-        || fat_sector < cache->base_sector
-        || fat_sector >= cache->base_sector + cache->sectors_buffered) {
-        uint32_t sectors_left_in_fat =
-            vol->first_fat_sector + vol->fat_size_sectors - fat_sector;
-        uint32_t to_read = sectors_left_in_fat < FAT_CACHE_SECTORS
-            ? sectors_left_in_fat : FAT_CACHE_SECTORS;
-        uint32_t got = vol->read_sectors(vol->ctx, fat_sector, to_read, cache->buf);
-
-        if (got == 0 && to_read > 1) {
-            /* Some real drives/controllers are pickier about multi-sector
-             * reads than this module's synthetic tests can catch. Rather
-             * than let that turn into an outright "can't map this file"
-             * failure, fall back to the single-sector read this code
-             * always used before batching -- already proven to work on
-             * real hardware -- before giving up. */
-            to_read = 1;
-            got = vol->read_sectors(vol->ctx, fat_sector, to_read, cache->buf);
-        }
-        if (got == 0) {
+    if (cache->sector != fat_sector) {
+        if (vol->read_sectors(vol->ctx, fat_sector, 1, cache->buf) != 1) {
             return FAT32RO_ERROR_READ_FAILED;
         }
-        cache->base_sector = fat_sector;
-        cache->sectors_buffered = got;
+        cache->sector = fat_sector;
     }
 
-    *out_next = read_u32le(cache->buf
-        + (fat_sector - cache->base_sector) * FAT32RO_SECTOR_BYTES + entry_offset)
-        & FAT32_ENTRY_MASK;
+    *out_next = read_u32le(cache->buf + entry_offset) & FAT32_ENTRY_MASK;
     return FAT32RO_SUCCESS;
 }
 
@@ -317,13 +275,13 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
     uint32_t cluster;
     uint32_t steps = 0;
     int count = 0;
+    fat_cache_t fat_cache;
 
     if (vol == NULL || out == NULL || max_entries <= 0) {
         return -(int)FAT32RO_ERROR_INVALID_PARAM;
     }
 
-    g_fat_cache.base_sector = FAT32RO_NO_CACHED_SECTOR;
-    g_fat_cache.sectors_buffered = 0;
+    fat_cache.sector = FAT32RO_NO_CACHED_SECTOR;
 
     cluster = first_cluster;
     if (!cluster_is_valid_data_cluster(vol, cluster)) {
@@ -388,7 +346,7 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
             if (++steps > vol->total_clusters) {
                 return -(int)FAT32RO_ERROR_CLUSTER_CHAIN;
             }
-            err = read_fat_entry(vol, cluster, &g_fat_cache, &next);
+            err = read_fat_entry(vol, cluster, &fat_cache, &next);
             if (err != FAT32RO_SUCCESS) {
                 return -(int)err;
             }
@@ -467,13 +425,13 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
     uint32_t run_start_cluster;
     uint32_t run_length_clusters;
     uint32_t steps = 0;
+    fat_cache_t fat_cache;
 
     if (vol == NULL || out == NULL) {
         return FAT32RO_ERROR_INVALID_PARAM;
     }
 
-    g_fat_cache.base_sector = FAT32RO_NO_CACHED_SECTOR;
-    g_fat_cache.sectors_buffered = 0;
+    fat_cache.sector = FAT32RO_NO_CACHED_SECTOR;
 
     out->extent_count = 0;
     out->total_sectors = 0;
@@ -501,7 +459,7 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
             return FAT32RO_ERROR_CLUSTER_CHAIN;
         }
 
-        err = read_fat_entry(vol, cluster, &g_fat_cache, &next);
+        err = read_fat_entry(vol, cluster, &fat_cache, &next);
         if (err != FAT32RO_SUCCESS) {
             return err;
         }
