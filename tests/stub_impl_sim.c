@@ -72,7 +72,90 @@ usb_error_t usb_Init(usb_event_callback_t handler, usb_callback_data_t *data,
 { (void)handler; (void)data; (void)descriptors; (void)flags; return USB_SUCCESS; }
 usb_error_t usb_WaitForInterrupt(void) { return USB_SUCCESS; }
 usb_error_t usb_ResetDevice(usb_device_t dev) { (void)dev; return USB_SUCCESS; }
-void usb_HandleEvents(void) { sim_advance_clock(SIM_TICKS_PER_LOOP_ITERATION); }
+
+/* --- delayed-completion support -----------------------------------
+ * Default (sim_set_read_delay_iterations(0), the initial state) keeps
+ * every existing test's behavior exactly as it was: msd_ReadAsync's
+ * callback fires before it returns. Setting a delay defers the callback
+ * until that many further usb_HandleEvents() calls have happened
+ * instead -- modeling a transfer genuinely still in flight while the
+ * simulated clock (which usb_HandleEvents() also advances) keeps
+ * moving. An always-immediate callback can never exercise a frame
+ * that's still loading while the wall clock moves on without it, which
+ * is exactly the condition a real, slower-than-encoded-rate USB read
+ * puts player_v2.c's scheduler under. */
+#define SIM_MAX_PENDING_TRANSFERS 8
+typedef struct {
+    msd_transfer_t *xfer;
+    uint32_t lba;
+    uint24_t count;
+    void *buffer;
+    unsigned remaining;
+} sim_pending_transfer_t;
+
+static sim_pending_transfer_t g_pending[SIM_MAX_PENDING_TRANSFERS];
+static unsigned g_pending_count = 0;
+static unsigned g_read_delay_iterations = 0;
+
+void sim_set_read_delay_iterations(unsigned n)
+{
+    g_read_delay_iterations = n;
+}
+
+void sim_reset_read_delay(void)
+{
+    g_read_delay_iterations = 0;
+    g_pending_count = 0;
+}
+
+static void sim_complete_pending(sim_pending_transfer_t *p)
+{
+    msd_error_t error = MSD_SUCCESS;
+
+    if (p->lba == g_fail_on_lba) {
+        error = MSD_ERROR_TIMEOUT;
+        g_async_read_failures_injected++;
+    } else if (p->lba + p->count > g_drive_sectors) {
+        error = MSD_ERROR_INVALID_PARAM;
+    } else {
+        memcpy(p->buffer, g_drive + (uint64_t)p->lba * 512, (size_t)p->count * 512);
+    }
+
+    p->xfer->callback(error, p->xfer);
+}
+
+/* Services pending delayed transfers: called every usb_HandleEvents(), so
+ * a transfer submitted with delay N fires on the Nth call after the one
+ * that submitted it -- exactly the "callback arrives some number of
+ * event-service passes later, with real time having moved on in the
+ * meantime" shape real hardware has. */
+static void sim_service_pending(void)
+{
+    unsigned i = 0;
+
+    while (i < g_pending_count) {
+        if (g_pending[i].remaining > 0) {
+            g_pending[i].remaining--;
+        }
+        if (g_pending[i].remaining == 0) {
+            sim_pending_transfer_t done = g_pending[i];
+
+            g_pending[i] = g_pending[g_pending_count - 1];
+            g_pending_count--;
+            sim_complete_pending(&done);
+            /* Don't advance i: the slot we just filled from the back
+             * still needs servicing this same pass. */
+        } else {
+            ++i;
+        }
+    }
+}
+
+void usb_HandleEvents(void)
+{
+    sim_advance_clock(SIM_TICKS_PER_LOOP_ITERATION);
+    sim_service_pending();
+}
 void usb_Cleanup(void) {}
 
 msd_error_t msd_Open(msd_t *msd, usb_device_t usb)
@@ -96,27 +179,41 @@ uint24_t msd_Write(msd_t *msd, uint32_t lba, uint24_t count, const void *buffer)
 uint8_t msd_FindPartitions(msd_t *msd, msd_partition_t *partitions, uint8_t max)
 { (void)msd; (void)partitions; (void)max; return 0; }
 
-/* Real hardware calls back asynchronously later; our synthetic drive has
- * no I/O latency to model, so we fire the callback immediately, which is
- * exactly the "callback can run before the next line of caller code"
- * case player_v2.c's slot state machine has to be correct under. */
+/* With no delay configured (the default), fires the callback immediately,
+ * which is exactly the "callback can run before the next line of caller
+ * code" case player_v2.c's slot state machine has to be correct under.
+ * With sim_set_read_delay_iterations() set, defers completion instead --
+ * see the pending-transfer machinery above. */
 msd_error_t msd_ReadAsync(msd_transfer_t *xfer)
 {
-    msd_error_t error = MSD_SUCCESS;
-
     g_async_reads++;
 
-    if (xfer->lba == g_fail_on_lba) {
-        error = MSD_ERROR_TIMEOUT;
-        g_async_read_failures_injected++;
-    } else if (xfer->lba + xfer->count > g_drive_sectors) {
-        error = MSD_ERROR_INVALID_PARAM;
-    } else {
-        memcpy(xfer->buffer, g_drive + (uint64_t)xfer->lba * 512,
-               (size_t)xfer->count * 512);
+    if (g_read_delay_iterations > 0 && g_pending_count < SIM_MAX_PENDING_TRANSFERS) {
+        sim_pending_transfer_t *p = &g_pending[g_pending_count++];
+
+        p->xfer = xfer;
+        p->lba = xfer->lba;
+        p->count = xfer->count;
+        p->buffer = xfer->buffer;
+        p->remaining = g_read_delay_iterations;
+        return MSD_SUCCESS;
     }
 
-    xfer->callback(error, xfer);
+    {
+        msd_error_t error = MSD_SUCCESS;
+
+        if (xfer->lba == g_fail_on_lba) {
+            error = MSD_ERROR_TIMEOUT;
+            g_async_read_failures_injected++;
+        } else if (xfer->lba + xfer->count > g_drive_sectors) {
+            error = MSD_ERROR_INVALID_PARAM;
+        } else {
+            memcpy(xfer->buffer, g_drive + (uint64_t)xfer->lba * 512,
+                   (size_t)xfer->count * 512);
+        }
+
+        xfer->callback(error, xfer);
+    }
     return MSD_SUCCESS;
 }
 msd_error_t msd_WriteAsync(msd_transfer_t *xfer) { (void)xfer; return MSD_SUCCESS; }

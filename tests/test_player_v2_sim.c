@@ -18,6 +18,8 @@ extern void sim_inject_read_failure_at_lba(uint32_t lba);
 extern int sim_get_resume_record(uint8_t *out, size_t out_size);
 extern void sim_inject_key_at_call(int call_index, uint8_t key);
 extern void sim_reset_injected_keys(void);
+extern void sim_set_read_delay_iterations(unsigned n);
+extern void sim_reset_read_delay(void);
 extern unsigned g_async_reads;
 extern unsigned g_frames_rendered;
 extern unsigned g_screen_mode_fills;
@@ -117,6 +119,55 @@ static void test_full_playback_no_resume(void)
         CHECK(resume.last_presented_frame == frame_count - 1,
               "resume record points at the last frame shown");
     }
+
+    free(drive);
+}
+
+/* Regression test for a real hardware failure: sustained real-world USB
+ * read throughput just slightly below what the encoded frame rate needs
+ * used to cause near-total frame loss (one frame shown every several
+ * seconds while the vast majority of successfully-read frames were
+ * discarded as "already stale"), because the old scheduler compared
+ * against an ever-advancing wall-clock target and never resynchronized
+ * once behind -- once even slightly behind, every frame it finished
+ * reading was already obsolete by the time it arrived, and the gap only
+ * ever grew. This drive is built at the synthetic drive's default 24fps
+ * (see build_synthetic_drive), and every read is configured to take
+ * about 2.4x the ~41.67ms/frame budget (100 simulated 1ms loop
+ * iterations -- see SIM_TICKS_PER_LOOP_ITERATION in stub_impl_sim.c) --
+ * a sustained, not momentary, shortfall. The fix makes playback
+ * strictly sequential (always wait for the very next frame, never
+ * compare against the wall clock to decide what to skip), so nothing
+ * should ever be discarded: every frame that gets read should get
+ * shown, just slower than real-time instead of glitching. */
+static void test_sustained_slow_reads_still_show_every_frame(void)
+{
+    const uint32_t frame_count = 30;
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(frame_count, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "synthetic header parses");
+
+    g_frames_rendered = 0;
+    sim_set_read_delay_iterations(100);
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
+    sim_reset_read_delay();
+
+    CHECK(ok, "playback under sustained slow reads still reports success");
+    CHECK(g_frames_rendered == frame_count,
+          "every frame was shown despite reads consistently missing the frame budget "
+          "-- none silently discarded as stale");
 
     free(drive);
 }
@@ -374,6 +425,7 @@ static void test_empty_movie_rejected(void)
 int main(void)
 {
     test_full_playback_no_resume();
+    test_sustained_slow_reads_still_show_every_frame();
     test_resume_starts_mid_movie();
     test_read_error_is_fatal_and_reported();
     test_single_frame_movie();

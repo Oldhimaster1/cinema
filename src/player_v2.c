@@ -409,23 +409,6 @@ static bool prefill_frames(player_v2_t *player)
     return serialized_fill_slots(player, "prefill");
 }
 
-/* Frames that finished loading but are older than what the clock now
- * wants are stale -- we're behind schedule. Free their slots (counting
- * a drop) so refill_empty_slots can queue what actually comes next. */
-static void discard_obsolete_frames(player_v2_t *player, uint32_t wanted)
-{
-    uint8_t i;
-
-    for (i = 0; i < SLOT_COUNT; ++i) {
-        frame_slot_t *slot = &player->slots[i];
-
-        if (slot->state == SLOT_READY && slot->frame_number < wanted) {
-            slot->state = SLOT_EMPTY;
-            player->dropped_frames++;
-        }
-    }
-}
-
 static frame_slot_t *find_ready_frame(player_v2_t *player, uint32_t wanted)
 {
     uint8_t i;
@@ -1022,13 +1005,40 @@ static bool player_v2_loop(player_v2_t *player)
         }
 
         {
+            /* Deliberately sequential, never skip-ahead: the frame we
+             * look for is always the very next one after whatever's on
+             * screen, not "whatever the wall clock says right now". A
+             * wall-clock target sounds more correct, but it isn't --
+             * if the queue ever falls even slightly behind (real USB
+             * throughput dips below what the frame rate needs, even
+             * briefly), every frame that finishes loading is already
+             * older than the ever-advancing clock target by the time it
+             * arrives, so it gets thrown away, and the gap between
+             * "what's loaded" and "what the clock wants" only ever
+             * grows -- a real hardware-confirmed failure mode (near-total
+             * frame loss, playback trickling out roughly one lucky frame
+             * every few seconds, recoverable only by a manual seek since
+             * that's the only place anything resyncs the queue).
+             *
+             * Asking for next_frame strictly in order instead can't
+             * diverge like that by construction: the queue can only ever
+             * be "caught up to" this target or still working on it, never
+             * hopelessly behind a target that keeps moving out from under
+             * it. `wanted` is still computed and still gates *early*
+             * presentation (see the wanted < next_frame check below) so
+             * fast hardware still paces itself to the real frame rate
+             * instead of racing through the movie -- it just never causes
+             * a frame to be skipped or discarded. The cost is that if the
+             * hardware genuinely can't sustain the encoded rate, playback
+             * runs slower than real time instead of dropping content to
+             * keep up -- the only sane option once you rule out being
+             * able to invent bytes that haven't arrived yet. */
             uint32_t wanted = desired_frame(player, clock());
-            frame_slot_t *slot;
+            uint32_t next_frame = player->has_presented
+                ? player->last_frame_presented + 1 : player->start_frame;
+            frame_slot_t *slot = find_ready_frame(player, next_frame);
 
-            discard_obsolete_frames(player, wanted);
-            slot = find_ready_frame(player, wanted);
-
-            if (slot != NULL) {
+            if (slot != NULL && wanted >= next_frame) {
                 if (player->buffering_shown) {
                     /* Stall resolved -- scrub the stale "Buffering..."
                      * text out of both swap buffers via the same
@@ -1074,10 +1084,15 @@ static bool player_v2_loop(player_v2_t *player)
                         return false;
                     }
                 }
-            } else if (player->has_presented
-                       && wanted > player->last_frame_presented) {
-                /* Wanted frame isn't ready yet -- hold the currently
-                 * displayed frame rather than show nothing. */
+            } else if (slot == NULL && player->has_presented) {
+                /* next_frame isn't ready yet -- hold the currently
+                 * displayed frame rather than show nothing. (The other
+                 * remaining case -- slot != NULL but wanted < next_frame,
+                 * i.e. a frame is ready ahead of schedule -- matches
+                 * neither branch and does nothing, which is correct:
+                 * there's a frame in hand, just not its turn yet, so
+                 * quietly wait for the clock rather than count it as a
+                 * stall.) */
                 player->repeated_frames++;
 
                 if (!player->buffering_shown

@@ -47,7 +47,9 @@ no need to dedicate a whole drive to a single video.
    ~262-273 KiB/s tested USB throughput with headroom at this format's
    15,360 bytes/frame (see "Performance" below) -- raise it with `--fps`
    (e.g. `--fps 24` or `--fps 24000/1001` for film-rate content) if your
-   drive is faster than that, at the risk of dropped frames if it isn't.
+   drive is faster than that -- playback never drops frames to keep up,
+   so if it isn't fast enough the movie just runs slower than real time
+   (with a "Buffering..." overlay) instead of skipping content.
    `--start`/`--duration` trims, and `--palette-samples` controls how
    many frames are sampled when building the movie's global 16-color
    palette (see `--help`).
@@ -181,6 +183,28 @@ not tuning:
    gone now; the next frame's first draw call still waits correctly if
    the LCD genuinely hasn't caught up, but no longer waits when there
    was USB work it could have overlapped with instead.
+
+3. **A scheduler that chased an ever-advancing clock instead of playing
+   sequentially.** `player_v2.c` used to decide which frame to show by
+   asking "what frame should be on screen right now, based on the wall
+   clock?" and discarding anything it had loaded that was older than
+   that. On real hardware, once sustained USB throughput fell even
+   slightly short of what the encoded frame rate needed, every frame it
+   finished reading was already stale by the time it arrived -- so it
+   got thrown away, and the gap between "what's loaded" and "what the
+   clock wants" only ever grew, with no way back short of a manual
+   seek. The result was near-total frame loss: playback trickling out
+   roughly one lucky frame every few seconds while the vast majority of
+   successfully-read frames were silently discarded, confirmed via a
+   host-side simulation that reproduces sustained slow reads (the
+   original scheduler doesn't just play badly under that condition, it
+   hangs indefinitely and never finishes the movie). The player now
+   always asks for the very next frame in sequence and never skips
+   ahead, using the wall clock only to pace playback to the encoded
+   rate when the hardware *can* keep up. If the hardware can't sustain
+   the encoded rate, the movie now plays every frame, just slower than
+   real time (with a "Buffering..." overlay), instead of glitching
+   through most of it.
 
 The build compiles at `-O3` (the CE Toolchain default is `-Oz`,
 optimize for *size*) -- free performance for a few extra KB of flash.
