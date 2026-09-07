@@ -49,6 +49,22 @@ static uint32_t disk_read_counting(void *ctx, uint32_t lba, uint32_t count, void
     return disk_read(ctx, lba, count, buffer);
 }
 
+/* Simulates a real drive/controller that some hardware testing turned up:
+ * one that flatly refuses a multi-sector read (returns 0, not a short
+ * read) while single-sector reads work fine -- read_fat_entry's batched
+ * cache fill must fall back to a single-sector read rather than treat
+ * that as a hard failure. */
+static uint32_t g_multi_sector_rejections;
+static uint32_t disk_read_rejects_multi_sector(void *ctx, uint32_t lba, uint32_t count,
+                                                 void *buffer)
+{
+    if (count > 1) {
+        g_multi_sector_rejections++;
+        return 0;
+    }
+    return disk_read(ctx, lba, count, buffer);
+}
+
 static void put_u16le(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put_u32le(uint8_t *p, uint32_t v)
 {
@@ -609,6 +625,41 @@ static void test_extent_map_batches_fat_reads_across_nearby_fragments(void)
           "all touched FAT sectors fall in one cache window, so one fill covers the whole walk");
 }
 
+static void test_extent_map_falls_back_when_drive_rejects_multi_sector_fat_reads(void)
+{
+    /* Regression test for a real hardware report: a drive/controller
+     * that flatly refuses a multi-sector read of the FAT (see
+     * disk_read_rejects_multi_sector) turned "select a movie" into
+     * "error mapping file (fragmented or corrupt?)" for every file,
+     * because a rejected batched fill was treated as an unrecoverable
+     * read failure. The single-sector fallback in read_fat_entry must
+     * still let a completely ordinary, non-fragmented file map
+     * successfully on such a drive. */
+    const uint32_t num_clusters = 50;
+    fs_layout_t l = standard_layout(0);
+    fat32ro_volume_t vol;
+    fat32ro_extent_map_t map;
+    uint32_t c;
+
+    reset_disk();
+    format_disk(&l);
+    for (c = 10; c < 10 + num_clusters - 1; ++c) {
+        set_fat_entry(&l, c, c + 1);
+    }
+    set_fat_entry(&l, 10 + num_clusters - 1, 0x0FFFFFFF);
+
+    CHECK(fat32ro_mount(&vol, disk_read_rejects_multi_sector, NULL) == FAT32RO_SUCCESS,
+          "mount succeeds (mount itself only ever does single-sector reads)");
+
+    g_multi_sector_rejections = 0;
+    CHECK(fat32ro_build_extent_map(&vol, 10,
+              (uint32_t)num_clusters * l.sectors_per_cluster * 512u, &map) == FAT32RO_SUCCESS,
+          "extent map still builds via the single-sector fallback");
+    CHECK(map.extent_count == 1, "contiguous file still collapses to one extent");
+    CHECK(g_multi_sector_rejections > 0,
+          "the batched fill was actually attempted (and rejected) at least once");
+}
+
 static void test_extent_map_fragmented_file(void)
 {
     fs_layout_t l = standard_layout(0);
@@ -810,6 +861,7 @@ int main(void)
     test_extent_map_contiguous_file();
     test_extent_map_reuses_fat_sectors_instead_of_rereading();
     test_extent_map_batches_fat_reads_across_nearby_fragments();
+    test_extent_map_falls_back_when_drive_rejects_multi_sector_fat_reads();
     test_extent_map_fragmented_file();
     test_extent_map_rounds_up_to_cluster_but_not_beyond();
     test_extent_map_zero_length_file();

@@ -92,6 +92,16 @@ static fat32ro_error_t read_fat_entry(const fat32ro_volume_t *vol, uint32_t clus
             ? sectors_left_in_fat : FAT_CACHE_SECTORS;
         uint32_t got = vol->read_sectors(vol->ctx, fat_sector, to_read, cache->buf);
 
+        if (got == 0 && to_read > 1) {
+            /* Some real drives/controllers are pickier about multi-sector
+             * reads than this module's synthetic tests can catch. Rather
+             * than let that turn into an outright "can't map this file"
+             * failure, fall back to the single-sector read this code
+             * always used before batching -- already proven to work on
+             * real hardware -- before giving up. */
+            to_read = 1;
+            got = vol->read_sectors(vol->ctx, fat_sector, to_read, cache->buf);
+        }
         if (got == 0) {
             return FAT32RO_ERROR_READ_FAILED;
         }
