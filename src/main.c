@@ -5,6 +5,7 @@
 #include "player_v2.h"
 
 #include <fileioc.h>
+#include <graphx.h>
 #include <msddrvce.h>
 #include <tice.h>
 #include <usbdrvce.h>
@@ -115,60 +116,6 @@ static bool has_playable_extension(const char *name)
     }
 
     return ext_matches(name + len - 3, "BIN") || ext_matches(name + len - 3, "CIN");
-}
-
-/* Simple scrolling text list: Up/Down to move, Enter or 2nd to select,
- * Clear to back out. Returns the selected index, or -1 if the user
- * backed out. durations[i] is an optional "M:SS" string appended after
- * entries[i].name (empty if that file's duration couldn't be read --
- * see probe_durations), or NULL to skip showing durations entirely. */
-static int run_file_browser(const fat32ro_dirent_t *entries, int count,
-                             const char (*durations)[8])
-{
-    int selected = 0;
-    int top = 0;
-
-    for (;;) {
-        int i;
-        uint8_t key;
-
-        os_ClrHome();
-        putstr("Select a movie (Clear to exit)");
-        for (i = top; i < count && i < top + BROWSER_VISIBLE_ROWS; ++i) {
-            char line[FAT32RO_MAX_NAME + 12];
-
-            if (durations != NULL && durations[i][0] != '\0') {
-                sprintf(line, "%c%s %s", (i == selected) ? '>' : ' ',
-                        entries[i].name, durations[i]);
-            } else {
-                sprintf(line, "%c%s", (i == selected) ? '>' : ' ', entries[i].name);
-            }
-            putstr(line);
-        }
-
-        do {
-            key = os_GetCSC();
-        } while (key == 0);
-
-        if (key == sk_Clear) {
-            return -1;
-        }
-        if (key == sk_Enter || key == sk_2nd) {
-            return selected;
-        }
-        if (key == sk_Up && selected > 0) {
-            selected--;
-        } else if (key == sk_Down && selected < count - 1) {
-            selected++;
-        }
-
-        if (selected < top) {
-            top = selected;
-        }
-        if (selected >= top + BROWSER_VISIBLE_ROWS) {
-            top = selected - BROWSER_VISIBLE_ROWS + 1;
-        }
-    }
 }
 
 /* Prompts "resume where you left off?" and, if the user says yes and a
@@ -285,6 +232,138 @@ static const char *read_cin2_header_for_entry(global_t *global, const fat32ro_vo
     return NULL;
 }
 
+#define BROWSER_UI_FG   16 /* palette index just past the movie's own 0..15 */
+#define BROWSER_UI_BG   17
+#define BROWSER_TEXT_X   2
+#define BROWSER_TITLE_Y  4
+#define BROWSER_ROW0_Y  18
+#define BROWSER_ROW_H   10
+#define BROWSER_THUMB_X 160
+#define BROWSER_THUMB_Y 20
+
+static uint8_t g_thumb_sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
+
+/* Decodes entry's frame 0 into g_thumb_sprite_data (a real gfx_sprite_t)
+ * and fills *out_palette with its movie's palette, so run_file_browser
+ * can show a live preview of whichever file is currently highlighted.
+ * Returns false (leaving the thumbnail blank) on anything short of a
+ * clean, contiguous frame 0 -- a fragmented file's frame 0 spanning an
+ * extent boundary is treated the same as "no preview available" rather
+ * than pulled in with the multi-part read machinery player_v2.c uses
+ * for actual playback; a missing preview isn't worth that here. */
+static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
+                            const fat32ro_dirent_t *entry, uint8_t *header_sector,
+                            fat32ro_extent_map_t *scratch_map, uint16_t *out_palette)
+{
+    cin2_header_t header;
+    uint32_t lba, run;
+    gfx_sprite_t *sprite = (gfx_sprite_t *)g_thumb_sprite_data;
+
+    if (read_cin2_header_for_entry(global, vol, entry, header_sector, scratch_map, &header) != NULL
+        || header.width != CINEMA_V2_WIDTH || header.height != CINEMA_V2_HEIGHT) {
+        return false;
+    }
+    if (!fat32ro_extent_lookup(scratch_map, cin2_frame_lba(0), &lba, &run)
+        || run < CIN2_FRAME_SECTORS
+        || msd_Read(&global->msd, lba, CIN2_FRAME_SECTORS, sprite->data) != CIN2_FRAME_SECTORS) {
+        return false;
+    }
+
+    sprite->width = CINEMA_V2_WIDTH;
+    sprite->height = CINEMA_V2_HEIGHT;
+    memcpy(out_palette, header.palette, sizeof(header.palette));
+    return true;
+}
+
+/* Scrolling list in graphics mode (needed so the highlighted file's
+ * thumbnail -- native 160x96, drawn via the same gfx_ScaledSprite_NoClip
+ * player_v2.c uses -- can share the screen with the text list; TI-OS
+ * text output and GraphX don't compose on the same screen otherwise).
+ * Up/Down to move, Enter or 2nd to select, Clear to back out. Returns
+ * the selected index, or -1 if the user backed out. durations[i] is an
+ * optional "M:SS" string appended after entries[i].name (empty if that
+ * file's duration couldn't be read -- see probe_durations), or NULL to
+ * skip showing durations entirely. The browser's own UI text always
+ * uses BROWSER_UI_FG/BG (set once, outside the movie palette's 0..15
+ * range) so it stays legible no matter which movie's colors are
+ * currently loaded into the thumbnail's palette slots. */
+static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
+                             const fat32ro_dirent_t *entries, int count,
+                             const char (*durations)[8], uint8_t *header_sector,
+                             fat32ro_extent_map_t *scratch_map)
+{
+    static const uint16_t ui_palette[2] = { 0x7FFF, 0x0000 }; /* white, black */
+    int selected = 0;
+    int top = 0;
+    int thumb_index = -1;
+    bool thumb_valid = false;
+
+    gfx_Begin();
+    gfx_SetPalette(ui_palette, sizeof(ui_palette), BROWSER_UI_FG);
+    gfx_SetTextFGColor(BROWSER_UI_FG);
+    gfx_SetTextBGColor(BROWSER_UI_BG);
+
+    for (;;) {
+        int i;
+        uint8_t key;
+
+        gfx_SetColor(BROWSER_UI_BG);
+        gfx_FillRectangle_NoClip(0, 0, GFX_LCD_WIDTH, GFX_LCD_HEIGHT);
+        gfx_PrintStringXY("Select a movie (Clear to exit)", BROWSER_TEXT_X, BROWSER_TITLE_Y);
+        for (i = top; i < count && i < top + BROWSER_VISIBLE_ROWS; ++i) {
+            char line[FAT32RO_MAX_NAME + 12];
+
+            if (durations != NULL && durations[i][0] != '\0') {
+                sprintf(line, "%c%s %s", (i == selected) ? '>' : ' ',
+                        entries[i].name, durations[i]);
+            } else {
+                sprintf(line, "%c%s", (i == selected) ? '>' : ' ', entries[i].name);
+            }
+            gfx_PrintStringXY(line, BROWSER_TEXT_X, BROWSER_ROW0_Y + (i - top) * BROWSER_ROW_H);
+        }
+
+        if (thumb_index != selected) {
+            uint16_t movie_palette[16];
+
+            thumb_valid = load_thumbnail(global, vol, &entries[selected], header_sector,
+                                          scratch_map, movie_palette);
+            if (thumb_valid) {
+                gfx_SetPalette(movie_palette, sizeof(movie_palette), 0);
+            }
+            thumb_index = selected;
+        }
+        if (thumb_valid) {
+            gfx_ScaledSprite_NoClip((gfx_sprite_t *)g_thumb_sprite_data,
+                                     BROWSER_THUMB_X, BROWSER_THUMB_Y, 1, 1);
+        }
+
+        do {
+            key = os_GetCSC();
+        } while (key == 0);
+
+        if (key == sk_Clear) {
+            gfx_End();
+            return -1;
+        }
+        if (key == sk_Enter || key == sk_2nd) {
+            gfx_End();
+            return selected;
+        }
+        if (key == sk_Up && selected > 0) {
+            selected--;
+        } else if (key == sk_Down && selected < count - 1) {
+            selected++;
+        }
+
+        if (selected < top) {
+            top = selected;
+        }
+        if (selected >= top + BROWSER_VISIBLE_ROWS) {
+            top = selected - BROWSER_VISIBLE_ROWS + 1;
+        }
+    }
+}
+
 /* "M:SS" (or "H:MM:SS" for anything an hour or longer) for the browser
  * list -- deliberately not shared with player_v2.c's own
  * format_timecode: that one always formats a *frame number* against a
@@ -304,37 +383,54 @@ static void format_duration(char *out, uint32_t frame_count, uint32_t fps_num, u
     }
 }
 
-/* Probes every playable file's header (one sector each) to fill in a
- * "M:SS" duration string per entry, shown alongside the name in the
- * browser. durations[i][0] is left '\0' for anything unreadable/invalid
- * -- the browser just shows the bare name for those, same as before this
+/* Header-only fast path for probe_durations: a duration only needs
+ * frame_count/fps, which live in the header at file-relative sector 0 --
+ * finding that sector doesn't need a whole cluster-chain walk, just the
+ * O(1) cluster-to-LBA conversion fat32ro_first_sector_lba does, so
+ * probing every playable file's header doesn't cost anywhere near what
+ * fully extent-mapping every one of them up front would (read_cin2_
+ * header_for_entry, used elsewhere, does the latter -- necessary there
+ * because playback needs the whole map, wasteful here since only one of
+ * these files is even going to get played). */
+static const char *peek_cin2_header_fast(global_t *global, const fat32ro_volume_t *vol,
+                                           const fat32ro_dirent_t *entry,
+                                           uint8_t *header_sector_buf, cin2_header_t *out_header)
+{
+    uint32_t lba;
+
+    if (!fat32ro_first_sector_lba(vol, entry->first_cluster, &lba)
+        || msd_Read(&global->msd, lba, 1, header_sector_buf) != 1) {
+        return "error reading movie header";
+    }
+    if (!cin2_has_magic(header_sector_buf) || !cin2_parse_header(header_sector_buf, out_header)) {
+        return "not a valid CIN2 file";
+    }
+
+    return NULL;
+}
+
+/* Probes every playable file's header (one sector each, via the fast
+ * path above -- no cluster-chain walk) to fill in a "M:SS" duration
+ * string per entry, shown alongside the name in the browser.
+ * durations[i][0] is left '\0' for anything unreadable/invalid -- the
+ * browser just shows the bare name for those, same as before this
  * existed, rather than treating it as an error this early (the file
  * might still be perfectly playable once actually selected, or might
  * not -- either way play_fat_file is what decides that). Reuses
- * header_sector/scratch_map (the same scratch buffers play_fat_file
- * uses for whichever file ends up actually selected) since nothing else
- * needs them until then. */
+ * header_sector (the same scratch buffer play_fat_file uses for
+ * whichever file ends up actually selected) since nothing else needs it
+ * until then. */
 static void probe_durations(global_t *global, const fat32ro_volume_t *vol,
                               const fat32ro_dirent_t *playable, int playable_count,
-                              uint8_t *header_sector, fat32ro_extent_map_t *scratch_map,
-                              char durations[][8])
+                              uint8_t *header_sector, char durations[][8])
 {
     int i;
-
-    if (playable_count > 1) {
-        /* A single file is about to get re-mapped anyway the instant
-         * it's chosen (there's no browser wait for a 1-file list to
-         * matter), so only bother with the loading message when there's
-         * an actual list to sit and look at. */
-        putstr("scanning movies...");
-    }
 
     for (i = 0; i < playable_count; ++i) {
         cin2_header_t header;
 
         durations[i][0] = '\0';
-        if (read_cin2_header_for_entry(global, vol, &playable[i], header_sector,
-                                         scratch_map, &header) == NULL
+        if (peek_cin2_header_fast(global, vol, &playable[i], header_sector, &header) == NULL
             && header.width == CINEMA_V2_WIDTH && header.height == CINEMA_V2_HEIGHT) {
             format_duration(durations[i], header.frame_count, header.fps_num, header.fps_den);
         }
@@ -460,7 +556,7 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
         return true;
     }
 
-    probe_durations(global, &vol, playable, playable_count, header_sector, &movie_map, durations);
+    probe_durations(global, &vol, playable, playable_count, header_sector, durations);
 
     /* Loops back to the browser after a movie ends, is exited early
      * (Clear during playback), or fails to load/play -- only backing
@@ -471,7 +567,8 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
      * real gap. */
     *played_ok = true;
     for (;;) {
-        int choice = run_file_browser(playable, playable_count, durations);
+        int choice = run_file_browser(global, &vol, playable, playable_count, durations,
+                                       header_sector, &movie_map);
 
         if (choice < 0) {
             return true; /* user backed out of the browser -- exit Cinema */

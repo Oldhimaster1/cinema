@@ -140,4 +140,14 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
 bool fat32ro_extent_lookup(const fat32ro_extent_map_t *map, uint32_t sector_offset,
                             uint32_t *out_lba, uint32_t *out_run_sectors);
 
+/* Cheap O(1) conversion from a file's first cluster to its first
+ * sector's LBA -- no FAT chain walk, unlike fat32ro_build_extent_map.
+ * For a caller that only needs one sector near the start of a file
+ * (e.g. peeking a header to show a preview/duration in a file list)
+ * and doesn't need the whole extent map, this is far cheaper than
+ * building one just to immediately look up sector 0 of it. Returns
+ * false if first_cluster isn't a valid data cluster for vol. */
+bool fat32ro_first_sector_lba(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                                uint32_t *out_lba);
+
 #endif

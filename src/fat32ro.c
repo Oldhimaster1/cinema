@@ -28,6 +28,16 @@ static uint32_t cluster_to_lba(const fat32ro_volume_t *vol, uint32_t cluster)
     return vol->first_data_sector + (cluster - 2) * (uint32_t)vol->sectors_per_cluster;
 }
 
+bool fat32ro_first_sector_lba(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                                uint32_t *out_lba)
+{
+    if (!cluster_is_valid_data_cluster(vol, first_cluster)) {
+        return false;
+    }
+    *out_lba = cluster_to_lba(vol, first_cluster);
+    return true;
+}
+
 /* A FAT sector holds FAT32RO_SECTOR_BYTES/4 = 128 consecutive cluster-chain
  * entries, and cluster chains are walked one cluster at a time, so
  * consecutive steps very often land in the SAME FAT sector -- especially
