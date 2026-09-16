@@ -34,6 +34,14 @@ LTOFLAGS = -Wall -Wextra -O3
 #               comment and docs/RENDERER.md).
 # Override on the command line, e.g. `make CINEMA_RENDERER=fixed_c`.
 CINEMA_RENDERER ?= graphx
+CINEMA_BUILD ?= production
+ifeq ($(CINEMA_BUILD),diagnostic)
+CFLAGS += -DCINEMA_DIAGNOSTIC=1
+CXXFLAGS += -DCINEMA_DIAGNOSTIC=1
+LTOFLAGS += -DCINEMA_DIAGNOSTIC=1
+else ifneq ($(CINEMA_BUILD),production)
+$(error Unknown CINEMA_BUILD '$(CINEMA_BUILD)' -- use production or diagnostic)
+endif
 
 ifeq ($(CINEMA_RENDERER),fixed_c)
 CFLAGS   += -DCINEMA_RENDERER=CINEMA_RENDERER_FIXED_C

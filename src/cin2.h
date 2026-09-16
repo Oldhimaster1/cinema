@@ -20,8 +20,72 @@
  * unpacking bit-packed pixels on the ez80 core, which outweighed the I/O
  * savings from packing them in the first place. */
 #define CIN2_FRAME_SECTORS 30
+#define CIN2_PACKED4_FRAME_SECTORS 15
+#define CIN2_FLAG_PACKED4 0x01u
+
+/* Optional destination-placement extension stored entirely in reserved bytes
+ * of sector zero. Existing CIN2 frame offsets remain unchanged. */
+#define CIN2_PLACEMENT_MAGIC "CPE1"
+#define CIN2_PLACEMENT_VERSION 1
+#define CIN2_PLACEMENT_OFFSET 64
+#define CIN2_PLACEMENT_EXTENTS_OFFSET 128
+#define CIN2_PLACEMENT_MAX_EXTENTS 32
+#define CIN2_PLACEMENT_FLAG_PREPARED 0x01u
+#define CIN2_PLACEMENT_KNOWN_FLAGS CIN2_PLACEMENT_FLAG_PREPARED
 
 typedef struct {
+    uint32_t start_lba;
+    uint32_t sector_count;
+} cin2_placement_extent_t;
+
+typedef struct {
+    uint8_t flags;
+    uint16_t extent_count;
+    uint16_t descriptor_bytes;
+    uint16_t logical_sector_bytes;
+    uint8_t sectors_per_cluster;
+    uint32_t volume_serial;
+    uint32_t partition_base_lba;
+    uint32_t first_fat_lba;
+    uint32_t first_data_lba;
+    uint32_t fat_size_sectors;
+    uint32_t total_data_clusters;
+    uint32_t movie_first_cluster;
+    uint32_t movie_file_size;
+    uint32_t total_movie_sectors;
+    uint32_t immutable_header_crc;
+    cin2_placement_extent_t extents[CIN2_PLACEMENT_MAX_EXTENTS];
+} cin2_placement_t;
+
+typedef struct {
+    uint16_t logical_sector_bytes;
+    uint8_t sectors_per_cluster;
+    uint32_t volume_serial;
+    uint32_t partition_base_lba;
+    uint32_t first_fat_lba;
+    uint32_t first_data_lba;
+    uint32_t fat_size_sectors;
+    uint32_t total_data_clusters;
+    uint32_t movie_first_cluster;
+    uint32_t movie_file_size;
+    uint32_t immutable_header_crc;
+} cin2_placement_context_t;
+
+/* Parses the optional placement extension. Returns false for absent,
+ * unprepared, malformed, or CRC-invalid descriptors. */
+bool cin2_parse_placement(const uint8_t *raw_header, cin2_placement_t *out);
+
+/* Validates a parsed descriptor against the currently mounted FAT32 volume,
+ * selected directory entry, and immutable CIN2 header identity. */
+bool cin2_validate_placement(const cin2_placement_t *placement,
+                              const cin2_placement_context_t *context);
+
+/* Writes a placement extension into reserved header bytes without changing
+ * the ordinary CIN2 header or its CRC. Intended for host-side tooling/tests. */
+bool cin2_build_placement(uint8_t *raw_header, const cin2_placement_t *placement);
+
+typedef struct {
+    uint8_t flags;
     uint16_t width;
     uint16_t height;
     uint32_t fps_num;
@@ -46,10 +110,17 @@ bool cin2_parse_header(const uint8_t *raw, cin2_header_t *out);
  * headers), but used by tests and available for a future encoder. */
 void cin2_build_header(uint8_t *raw, const cin2_header_t *header);
 
+static inline uint32_t cin2_frame_sectors(uint8_t flags)
+{
+    return (flags & CIN2_FLAG_PACKED4) ? CIN2_PACKED4_FRAME_SECTORS : CIN2_FRAME_SECTORS;
+}
+static inline uint32_t cin2_frame_lba_for(uint32_t frame_number, uint8_t flags)
+{
+    return (uint32_t)CIN2_DATA_LBA + frame_number * cin2_frame_sectors(flags);
+}
 static inline uint32_t cin2_frame_lba(uint32_t frame_number)
 {
-    return (uint32_t)CIN2_DATA_LBA
-        + frame_number * (uint32_t)CIN2_FRAME_SECTORS;
+    return cin2_frame_lba_for(frame_number, 0);
 }
 
 /* True if a frame_count-frame movie's data (header sector plus every
@@ -58,6 +129,13 @@ static inline uint32_t cin2_frame_lba(uint32_t frame_number)
  * corrupt/hostile frame_count can't wrap 32-bit LBA math into looking
  * in-bounds. Callers must reject media where this returns false rather
  * than queueing reads that could run past the reported drive capacity. */
+static inline bool cin2_frame_count_fits_drive_mode(uint32_t frame_count, uint32_t drive_sectors, uint8_t flags)
+{
+    uint64_t needed;
+    if (flags & (uint8_t)~CIN2_FLAG_PACKED4) return false;
+    needed=(uint64_t)CIN2_DATA_LBA+(uint64_t)frame_count*cin2_frame_sectors(flags);
+    return needed <= drive_sectors;
+}
 bool cin2_frame_count_fits_drive(uint32_t frame_count, uint32_t drive_sectors);
 
 /* Standard CRC-32 (IEEE 802.3): poly 0xEDB88320, init/final XOR

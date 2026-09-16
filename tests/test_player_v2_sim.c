@@ -18,6 +18,7 @@ extern void sim_inject_read_failure_at_lba(uint32_t lba);
 extern int sim_get_resume_record(uint8_t *out, size_t out_size);
 extern void sim_inject_key_at_call(int call_index, uint8_t key);
 extern void sim_reset_injected_keys(void);
+extern void sim_set_held_key_range(int first_call, int last_call, uint8_t key);
 extern void sim_set_read_delay_iterations(unsigned n);
 extern void sim_reset_read_delay(void);
 extern unsigned g_async_reads;
@@ -357,6 +358,39 @@ static void test_seek_while_paused_resumes_and_jumps_forward(void)
     free(drive);
 }
 
+
+static void test_held_seek_key_does_not_terminate_playback(void)
+{
+    const uint32_t frame_count = 400;
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(frame_count, &sectors);
+    global_t global;
+    cin2_header_t header;
+    bool ok;
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "held-seek header parses");
+    sim_reset_injected_keys();
+    /* The Right key remains down across the blocking seek refill. Before the
+     * fix, serialized_fill_slot's os_GetCSC poll saw this same key and returned
+     * false, ending playback and opening diagnostics. */
+    sim_set_read_delay_iterations(8);
+    sim_set_held_key_range(150, 190, sk_Right);
+    g_frames_rendered = 0;
+    {
+        fat32ro_extent_map_t map = identity_map(sectors);
+        ok = player_v2_run(&global, &header, 0, &map, "");
+    }
+    sim_reset_read_delay();
+    sim_reset_injected_keys();
+    CHECK(ok, "held seek key is not classified as a fatal playback exit");
+    CHECK(g_frames_rendered > 0, "playback renders after held-key seek");
+    CHECK(g_frames_rendered < frame_count,
+          "held forward seek actually skips content instead of being ignored");
+    free(drive);
+}
+
 static void test_loop_toggle_restarts_from_beginning(void)
 {
     /* Short movie so a full pass finishes quickly. Loop is enabled
@@ -431,6 +465,7 @@ int main(void)
     test_single_frame_movie();
     test_exact_slot_count_frame_movie();
     test_seek_while_paused_resumes_and_jumps_forward();
+    test_held_seek_key_does_not_terminate_playback();
     test_loop_toggle_restarts_from_beginning();
     test_empty_movie_rejected();
 

@@ -65,6 +65,7 @@ typedef struct {
     uint32_t first_data_sector;  /* absolute LBA */
     uint32_t fat_size_sectors;
     uint32_t root_cluster;
+    uint32_t volume_serial;      /* BPB FAT32 volume ID at boot-sector offset 67 */
     uint32_t total_clusters;     /* data-region cluster count; bounds chain walks */
     uint8_t sectors_per_cluster;
 } fat32ro_volume_t;
@@ -116,6 +117,13 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
                             fat32ro_dirent_t *out, int max_entries);
 
 /* fat32ro_list_directory(vol, vol->root_cluster, out, max_entries). */
+typedef bool (*fat32ro_dirent_filter_t)(const fat32ro_dirent_t *entry, void *ctx);
+/* Lists one filtered logical page. skip_matches counts only entries accepted by
+ * filter. out_has_more reports at least one additional accepted entry. */
+int fat32ro_list_directory_page(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                                uint32_t skip_matches, fat32ro_dirent_t *out,
+                                int max_entries, fat32ro_dirent_filter_t filter,
+                                void *filter_ctx, bool *out_has_more);
 int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int max_entries);
 
 typedef struct {
@@ -156,4 +164,18 @@ bool fat32ro_extent_lookup(const fat32ro_extent_map_t *map, uint32_t sector_offs
 bool fat32ro_first_sector_lba(const fat32ro_volume_t *vol, uint32_t first_cluster,
                                 uint32_t *out_lba);
 
+/* Read-only diagnostics for the most recent extent-map build. These counters
+ * do not alter caching, chain traversal, validation, or extent construction. */
+typedef struct {
+    uint32_t cluster_steps;
+    uint32_t fat_cache_hits;
+    uint32_t fat_cache_misses;
+    uint32_t fat_sector_reads;
+    uint32_t cycle_extent_comparisons;
+} fat32ro_map_diag_t;
+
+void fat32ro_map_diag_reset(void);
+void fat32ro_map_diag_get(fat32ro_map_diag_t *out);
+
 #endif
+

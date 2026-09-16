@@ -214,3 +214,76 @@ def test_resume_store_fills_then_evicts_slot_zero():
     assert fmt.resume_store_slot_for(store, "OVERFLOW.BIN") == 0
     found = fmt.resume_store_find(store, "M0.BIN")
     assert found is not None and found[0] == 0
+
+
+def _placement_case(extents=(fmt.PlacementExtent(108, 60),)):
+    header = fmt.build_header(fmt.Cin2Header(width=160, height=96,
+        fps_num=20, fps_den=1, frame_count=2, palette=tuple(range(16))))
+    d = fmt.PlacementDescriptor(sectors_per_cluster=4, volume_serial=0x12345678,
+        partition_base_lba=0, first_fat_lba=32, first_data_lba=100,
+        fat_size_sectors=64, total_data_clusters=10000, movie_first_cluster=4,
+        movie_file_size=60 * 512, total_movie_sectors=60,
+        immutable_header_crc=0xAABBCCDD, extents=extents)
+    c = fmt.PlacementContext(512, 4, 0x12345678, 0, 32, 100, 64,
+        10000, 4, 60 * 512, 0xAABBCCDD)
+    return header, d, c
+
+
+def test_placement_roundtrip_one_extent_and_header_unchanged():
+    header, d, c = _placement_case()
+    prepared = fmt.build_placement(header, d)
+    assert prepared[:58] == header[:58]
+    parsed = fmt.parse_placement(prepared)
+    assert parsed == d
+    assert fmt.validate_placement(parsed, c)
+
+
+def test_placement_roundtrip_multiple_extents():
+    header, d, c = _placement_case((fmt.PlacementExtent(108, 20),
+                                     fmt.PlacementExtent(500, 40)))
+    parsed = fmt.parse_placement(fmt.build_placement(header, d))
+    assert parsed is not None and fmt.validate_placement(parsed, c)
+
+
+def test_placement_absent_unprepared_and_crc_corruption_rejected():
+    header, d, _ = _placement_case()
+    assert fmt.parse_placement(header) is None
+    prepared = bytearray(fmt.build_placement(header, d))
+    prepared[fmt.PLACEMENT_OFFSET + 5] = 0
+    assert fmt.parse_placement(prepared) is None
+    prepared = bytearray(fmt.build_placement(header, d))
+    prepared[fmt.PLACEMENT_EXTENTS_OFFSET] ^= 1
+    assert fmt.parse_placement(prepared) is None
+    prepared = bytearray(fmt.build_placement(header, d))
+    prepared[fmt.PLACEMENT_OFFSET + 20] ^= 1
+    assert fmt.parse_placement(prepared) is None
+
+
+def test_placement_validation_identity_range_sum_overlap_and_first_lba():
+    from dataclasses import replace
+    header, d, c = _placement_case()
+    parsed = fmt.parse_placement(fmt.build_placement(header, d))
+    assert parsed is not None
+    for bad in [replace(c, volume_serial=9), replace(c, movie_first_cluster=5),
+                replace(c, movie_file_size=1), replace(c, immutable_header_crc=1),
+                replace(c, sectors_per_cluster=8)]:
+        assert not fmt.validate_placement(parsed, bad)
+    for extents in [
+        (fmt.PlacementExtent(109, 60),),
+        (fmt.PlacementExtent(108, 59),),
+        (fmt.PlacementExtent(99, 60),),
+        (fmt.PlacementExtent(108, 30), fmt.PlacementExtent(120, 30)),
+        (fmt.PlacementExtent(108, 0),),
+    ]:
+        assert not fmt.validate_placement(replace(parsed, extents=extents), c)
+
+
+def test_placement_builder_rejects_extent_count_boundaries():
+    header, d, _ = _placement_case()
+    import pytest
+    with pytest.raises(ValueError):
+        fmt.build_placement(header, d.__class__(**{**d.__dict__, "extents": ()}))
+    too_many = tuple(fmt.PlacementExtent(108 + i, 1)
+                     for i in range(fmt.PLACEMENT_MAX_EXTENTS + 1))
+    with pytest.raises(ValueError):
+        fmt.build_placement(header, d.__class__(**{**d.__dict__, "extents": too_many}))

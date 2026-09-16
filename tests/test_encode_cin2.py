@@ -257,3 +257,111 @@ def test_batch_encode_empty_directory_reports_no_matches(tmp_path):
     rc = enc.main([str(in_dir), str(tmp_path / "out")])
 
     assert rc == 2
+
+
+def test_palette_sampling_uses_complete_selected_duration(monkeypatch, tmp_path):
+    calls = []
+    red = _solid_frame((255, 0, 0))
+    blue = _solid_frame((0, 0, 255))
+
+    monkeypatch.setattr(enc, "probe_duration_seconds", lambda path: 600.0)
+
+    def fake_stream(path, fps_num, fps_den, start, duration, max_frames=None):
+        calls.append((duration, max_frames))
+        if max_frames is not None:
+            yield red
+            yield blue
+        else:
+            yield red
+
+    monkeypatch.setattr(enc, "stream_raw_frames", fake_stream)
+    out = tmp_path / "out.bin"
+    enc.encode(tmp_path / "input.mp4", out, 1, 1, 2, None, 1.0, jobs=1)
+    assert calls[0] == (1.0, 2)
+
+
+def test_full_movie_palette_span_is_not_capped(monkeypatch, tmp_path):
+    spans = []
+    frame = _solid_frame((20, 80, 220))
+    monkeypatch.setattr(enc, "probe_duration_seconds", lambda path: 180.0)
+
+    def fake_stream(path, fps_num, fps_den, start, duration, max_frames=None):
+        spans.append((duration, max_frames))
+        count = 2 if max_frames is not None else 180
+        for _ in range(count):
+            yield frame
+
+    monkeypatch.setattr(enc, "stream_raw_frames", fake_stream)
+    out = tmp_path / "movie.bin"
+    enc.encode(tmp_path / "input.mp4", out, 1, 1, 2, None, None, jobs=1)
+    assert spans[0] == (180.0, 2)
+    header = fmt.parse_header(out.read_bytes()[: fmt.HEADER_BYTES])
+    assert header.frame_count == 180
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not on PATH")
+def test_30_to_20_fps_preserves_motion_duration(tmp_path):
+    video_path = tmp_path / "timing.mp4"
+    output_path = tmp_path / "timing.bin"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc2=duration=6:size=320x240:rate=30",
+        str(video_path),
+    ], check=True)
+    enc.main([str(video_path), str(output_path), "--fps", "20",
+              "--palette-samples", "8", "--jobs", "1"])
+    header = fmt.parse_header(output_path.read_bytes()[: fmt.HEADER_BYTES])
+    encoded_duration = header.frame_count * header.fps_den / header.fps_num
+    assert abs(encoded_duration - 6.0) <= 2.0 / 20.0
+    assert 118 <= header.frame_count <= 122
+
+
+def test_rgb1555_roundtrip_display_endpoints():
+    assert enc.rgb1555_to_rgb888(0x0000) == (0, 0, 0)
+    assert enc.rgb1555_to_rgb888(0x7FFF) == (255, 255, 255)
+    for value in (0x7C00, 0x03E0, 0x001F, 0x4210, 0x1234):
+        assert enc.rgb888_to_rgb1555(*enc.rgb1555_to_rgb888(value)) == value
+
+
+def test_palette_image_contains_exact_rgb1555_display_colors():
+    frames = [enc.Image.new("RGB", (enc.WIDTH, enc.HEIGHT), (i * 16, 255 - i * 12, i * 9))
+              for i in range(16)]
+    pal = enc.build_global_palette(frames, 16)
+    entries = enc.palette_image_to_rgb1555(pal)
+    raw = pal.getpalette()
+    for i, value in enumerate(entries):
+        assert tuple(raw[i * 3:i * 3 + 3]) == enc.rgb1555_to_rgb888(value)
+
+
+def test_palette_uses_16_distinct_rgb1555_entries_when_source_is_diverse():
+    frame = enc.Image.new("RGB", (enc.WIDTH, enc.HEIGHT))
+    colors = [(r, g, b) for r in (0, 85, 170, 255)
+                        for g in (0, 85, 170, 255)
+                        for b in (0, 255)]
+    pixels = [colors[(x // 10 + y // 8 * 16) % len(colors)]
+              for y in range(enc.HEIGHT) for x in range(enc.WIDTH)]
+    frame.putdata(pixels)
+    entries = enc.palette_image_to_rgb1555(enc.build_global_palette([frame], 1))
+    assert len(set(entries)) == 16
+
+
+def test_clean_dither_removes_speckles_from_flat_surface():
+    colors = [(64, 64, 64), (192, 192, 192)]
+    pal = enc.build_global_palette([_solid_frame(c) for c in colors], 2)
+    frame = _solid_frame((120, 120, 120))
+    clean = enc.quantize_frame(frame, pal, "clean")
+    assert len(set(clean)) == 1
+
+
+def test_unknown_dither_mode_rejected():
+    pal = enc.build_global_palette([_solid_frame((0, 0, 0))], 1)
+    with pytest.raises(ValueError):
+        enc.quantize_frame(_solid_frame((0, 0, 0)), pal, "bogus")
+
+
+def test_automatic_palette_sample_policy():
+    assert enc.automatic_palette_samples(60) == 32
+    assert enc.automatic_palette_samples(600) == 64
+    assert enc.automatic_palette_samples(3600) == 128
+    assert enc.automatic_palette_samples(7000) == 256
+    assert enc.automatic_palette_samples(None) == 64

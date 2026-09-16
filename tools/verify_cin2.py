@@ -29,6 +29,8 @@ HEADER_BYTES = 512
 CRC_BYTES = 22
 DATA_LBA = 1
 FRAME_SECTORS = 30
+PACKED4_FRAME_SECTORS = 15
+FLAG_PACKED4 = 0x01
 SECTOR_BYTES = 512
 PALETTE_ENTRIES = 16
 WIDTH = 160
@@ -79,8 +81,9 @@ def verify(path: Path) -> dict:
         return {"ok": False, "errors": errors, "warnings": warnings, **result}
 
     flags = header_raw[5]
-    if flags != 0:
-        fail(errors, f"unknown flags byte 0x{flags:02X} (must be 0)")
+    if flags & ~FLAG_PACKED4:
+        fail(errors, f"unknown flags byte 0x{flags:02X}")
+    frame_sectors = PACKED4_FRAME_SECTORS if flags & FLAG_PACKED4 else FRAME_SECTORS
 
     # --- CRC ---------------------------------------------------------------
     stored_crc = struct.unpack_from("<L", header_raw, 22)[0]
@@ -102,6 +105,8 @@ def verify(path: Path) -> dict:
         "width": width, "height": height,
         "fps_num": fps_num, "fps_den": fps_den,
         "frame_count": frame_count,
+        "flags": flags,
+        "packing": "packed4" if flags & FLAG_PACKED4 else "raw8",
         "palette": [f"0x{p:04X}" for p in palette],
     }
     result["header"] = header_info
@@ -128,7 +133,7 @@ def verify(path: Path) -> dict:
         if bytes_per_frame != FRAME_BYTES:
             fail(errors, f"computed bytes/frame {bytes_per_frame} != spec FRAME_BYTES {FRAME_BYTES}")
 
-    required_sectors = DATA_LBA + frame_count * FRAME_SECTORS
+    required_sectors = DATA_LBA + frame_count * frame_sectors
     required_bytes = required_sectors * SECTOR_BYTES
     result["expected_size"] = required_bytes
     result["expected_frame_count"] = frame_count

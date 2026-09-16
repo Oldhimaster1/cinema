@@ -20,6 +20,14 @@ FRAME_SECTORS = 30
 SECTOR_BYTES = 512
 PALETTE_ENTRIES = 16
 
+PLACEMENT_MAGIC = b"CPE1"
+PLACEMENT_VERSION = 1
+PLACEMENT_OFFSET = 64
+PLACEMENT_EXTENTS_OFFSET = 128
+PLACEMENT_MAX_EXTENTS = 32
+PLACEMENT_FLAG_PREPARED = 0x01
+PLACEMENT_KNOWN_FLAGS = PLACEMENT_FLAG_PREPARED
+
 # The only geometry the calculator-side player (src/player_v2.c) knows
 # how to draw. An encoder targeting a different resolution would need a
 # corresponding change on the calculator, not just here.
@@ -31,6 +39,146 @@ HEIGHT = 96
 # of unpacking it back out cost more than the packing saved.
 FRAME_BYTES = WIDTH * HEIGHT
 assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
+
+
+@dataclass(frozen=True)
+class PlacementExtent:
+    start_lba: int
+    sector_count: int
+
+
+@dataclass
+class PlacementDescriptor:
+    flags: int = PLACEMENT_FLAG_PREPARED
+    logical_sector_bytes: int = 512
+    sectors_per_cluster: int = 0
+    volume_serial: int = 0
+    partition_base_lba: int = 0
+    first_fat_lba: int = 0
+    first_data_lba: int = 0
+    fat_size_sectors: int = 0
+    total_data_clusters: int = 0
+    movie_first_cluster: int = 0
+    movie_file_size: int = 0
+    total_movie_sectors: int = 0
+    immutable_header_crc: int = 0
+    extents: Tuple[PlacementExtent, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class PlacementContext:
+    logical_sector_bytes: int
+    sectors_per_cluster: int
+    volume_serial: int
+    partition_base_lba: int
+    first_fat_lba: int
+    first_data_lba: int
+    fat_size_sectors: int
+    total_data_clusters: int
+    movie_first_cluster: int
+    movie_file_size: int
+    immutable_header_crc: int
+
+
+def build_placement(header: bytes, d: PlacementDescriptor) -> bytes:
+    if len(header) != HEADER_BYTES:
+        raise ValueError("CIN2 header must be exactly 512 bytes")
+    if not 1 <= len(d.extents) <= PLACEMENT_MAX_EXTENTS:
+        raise ValueError("placement extent count out of range")
+    if d.logical_sector_bytes != 512 or d.sectors_per_cluster <= 0:
+        raise ValueError("unsupported placement geometry")
+    raw = bytearray(header)
+    raw[PLACEMENT_OFFSET:] = bytes(HEADER_BYTES - PLACEMENT_OFFSET)
+    p = PLACEMENT_OFFSET
+    descriptor_bytes = 64 + len(d.extents) * 8
+    struct.pack_into("<4sBBHHHB3x10I", raw, p,
+                     PLACEMENT_MAGIC, PLACEMENT_VERSION,
+                     d.flags | PLACEMENT_FLAG_PREPARED, len(d.extents),
+                     descriptor_bytes, d.logical_sector_bytes,
+                     d.sectors_per_cluster, d.volume_serial,
+                     d.partition_base_lba, d.first_fat_lba,
+                     d.first_data_lba, d.fat_size_sectors,
+                     d.total_data_clusters, d.movie_first_cluster,
+                     d.movie_file_size, d.total_movie_sectors,
+                     d.immutable_header_crc)
+    for i, extent in enumerate(d.extents):
+        struct.pack_into("<II", raw, PLACEMENT_EXTENTS_OFFSET + i * 8,
+                         extent.start_lba, extent.sector_count)
+    struct.pack_into("<I", raw, p + 56,
+                     crc32(raw[PLACEMENT_EXTENTS_OFFSET:
+                               PLACEMENT_EXTENTS_OFFSET + len(d.extents) * 8]))
+    struct.pack_into("<I", raw, p + 60, crc32(raw[p:p + 60]))
+    return bytes(raw)
+
+
+def parse_placement(header: bytes) -> Optional[PlacementDescriptor]:
+    if len(header) < HEADER_BYTES:
+        return None
+    p = PLACEMENT_OFFSET
+    magic, version, flags, count, size, sector_bytes, spc = struct.unpack_from(
+        "<4sBBHHHB", header, p)
+    if (magic != PLACEMENT_MAGIC or version != PLACEMENT_VERSION
+            or flags & ~PLACEMENT_KNOWN_FLAGS
+            or not flags & PLACEMENT_FLAG_PREPARED
+            or not 1 <= count <= PLACEMENT_MAX_EXTENTS
+            or size != 64 + count * 8
+            or p + size > HEADER_BYTES
+            or sector_bytes != 512 or spc == 0):
+        return None
+    extent_crc, metadata_crc = struct.unpack_from("<II", header, p + 56)
+    if metadata_crc != crc32(header[p:p + 60]):
+        return None
+    extent_raw = header[PLACEMENT_EXTENTS_OFFSET:PLACEMENT_EXTENTS_OFFSET + count * 8]
+    if extent_crc != crc32(extent_raw):
+        return None
+    values = struct.unpack_from("<10I", header, p + 16)
+    extents = tuple(PlacementExtent(*struct.unpack_from("<II", extent_raw, i * 8))
+                    for i in range(count))
+    return PlacementDescriptor(flags=flags, logical_sector_bytes=sector_bytes,
+        sectors_per_cluster=spc, volume_serial=values[0],
+        partition_base_lba=values[1], first_fat_lba=values[2],
+        first_data_lba=values[3], fat_size_sectors=values[4],
+        total_data_clusters=values[5], movie_first_cluster=values[6],
+        movie_file_size=values[7], total_movie_sectors=values[8],
+        immutable_header_crc=values[9], extents=extents)
+
+
+def validate_placement(d: PlacementDescriptor, c: PlacementContext) -> bool:
+    if (d.logical_sector_bytes != c.logical_sector_bytes
+            or d.sectors_per_cluster != c.sectors_per_cluster
+            or d.volume_serial != c.volume_serial
+            or d.partition_base_lba != c.partition_base_lba
+            or d.first_fat_lba != c.first_fat_lba
+            or d.first_data_lba != c.first_data_lba
+            or d.fat_size_sectors != c.fat_size_sectors
+            or d.total_data_clusters != c.total_data_clusters
+            or d.movie_first_cluster != c.movie_first_cluster
+            or d.movie_file_size != c.movie_file_size
+            or d.immutable_header_crc != c.immutable_header_crc
+            or c.logical_sector_bytes != 512 or c.sectors_per_cluster <= 0
+            or c.movie_first_cluster < 2
+            or not 1 <= len(d.extents) <= PLACEMENT_MAX_EXTENTS):
+        return False
+    expected_sectors = (c.movie_file_size + 511) // 512
+    if d.total_movie_sectors != expected_sectors:
+        return False
+    first_lba = c.first_data_lba + (c.movie_first_cluster - 2) * c.sectors_per_cluster
+    if first_lba > 0xFFFFFFFF or d.extents[0].start_lba != first_lba:
+        return False
+    data_end = c.first_data_lba + c.total_data_clusters * c.sectors_per_cluster
+    ranges = []
+    total = 0
+    for e in d.extents:
+        end = e.start_lba + e.sector_count
+        if (e.sector_count <= 0 or e.start_lba < c.first_data_lba
+                or end > data_end or end > 0x100000000):
+            return False
+        if any(e.start_lba < b and a < end for a, b in ranges):
+            return False
+        ranges.append((e.start_lba, end))
+        total += e.sector_count
+    return total == d.total_movie_sectors
+
 
 RESUME_MAGIC = b"CR2S"
 RESUME_BYTES = 33

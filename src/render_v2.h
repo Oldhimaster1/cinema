@@ -107,6 +107,7 @@ void render_scaled_fixed_c(const unsigned char *src);
 /* Same contract as render_scaled_fixed_c -- see src/render_v2_asm.s for
  * the unverified-by-execution caveat before enabling this. */
 void render_scaled_fixed_asm(const unsigned char *src);
+void render_scaled_packed4_asm(const unsigned char *src);
 #endif
 
 #endif

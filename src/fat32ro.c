@@ -1,6 +1,24 @@
+
 #include "fat32ro.h"
 #include <stddef.h>
 
+static fat32ro_map_diag_t g_map_diag;
+
+void fat32ro_map_diag_reset(void)
+{
+    g_map_diag.cluster_steps = 0;
+    g_map_diag.fat_cache_hits = 0;
+    g_map_diag.fat_cache_misses = 0;
+    g_map_diag.fat_sector_reads = 0;
+    g_map_diag.cycle_extent_comparisons = 0;
+}
+
+void fat32ro_map_diag_get(fat32ro_map_diag_t *out)
+{
+    if (out != NULL) {
+        *out = g_map_diag;
+    }
+}
 #define FAT32_EOC_MIN      0x0FFFFFF8u
 #define FAT32_BAD_CLUSTER  0x0FFFFFF7u
 #define FAT32_ENTRY_MASK   0x0FFFFFFFu
@@ -49,27 +67,62 @@ bool fat32ro_first_sector_lba(const fat32ro_volume_t *vol, uint32_t first_cluste
  * run. This cache lets a walk reuse the last sector it fetched instead
  * of re-reading it once per cluster. */
 #define FAT32RO_NO_CACHED_SECTOR 0xFFFFFFFFu
+#define FAT32RO_CACHE_SECTORS 4u
+
+/* The four-sector data window must not live in fat32ro_build_extent_map()'s
+ * stack frame. A 2048-byte local cache overflowed the calculator's limited
+ * main stack and caused a RAM reset when mapping began. Mapping is synchronous
+ * and non-reentrant, so one private static BSS window is safe. */
+static uint8_t g_fat_cache_buf[FAT32RO_CACHE_SECTORS * FAT32RO_SECTOR_BYTES];
 
 typedef struct {
-    uint32_t sector; /* absolute LBA currently buffered, or FAT32RO_NO_CACHED_SECTOR */
-    uint8_t buf[FAT32RO_SECTOR_BYTES];
+    uint32_t first_sector;
+    uint8_t sector_count;
 } fat_cache_t;
 
 static fat32ro_error_t read_fat_entry(const fat32ro_volume_t *vol, uint32_t cluster,
                                        fat_cache_t *cache, uint32_t *out_next)
 {
-    uint32_t fat_offset = cluster * 4;
-    uint32_t fat_sector = vol->first_fat_sector + fat_offset / FAT32RO_SECTOR_BYTES;
-    uint32_t entry_offset = fat_offset % FAT32RO_SECTOR_BYTES;
+    uint32_t fat_offset;
+    uint32_t fat_sector_index;
+    uint32_t fat_sector;
+    uint32_t cache_index;
+    uint32_t entry_offset;
 
-    if (cache->sector != fat_sector) {
-        if (vol->read_sectors(vol->ctx, fat_sector, 1, cache->buf) != 1) {
+    if (cluster > UINT32_MAX / 4u) {
+        return FAT32RO_ERROR_CLUSTER_CHAIN;
+    }
+    fat_offset = cluster * 4u;
+    fat_sector_index = fat_offset / FAT32RO_SECTOR_BYTES;
+    entry_offset = fat_offset % FAT32RO_SECTOR_BYTES;
+    if (fat_sector_index >= vol->fat_size_sectors) {
+        return FAT32RO_ERROR_CLUSTER_CHAIN;
+    }
+    fat_sector = vol->first_fat_sector + fat_sector_index;
+
+    if (cache->first_sector == FAT32RO_NO_CACHED_SECTOR
+        || fat_sector < cache->first_sector
+        || fat_sector - cache->first_sector >= cache->sector_count) {
+        uint32_t remaining = vol->fat_size_sectors - fat_sector_index;
+        uint32_t count = remaining < FAT32RO_CACHE_SECTORS
+            ? remaining : FAT32RO_CACHE_SECTORS;
+
+        g_map_diag.fat_cache_misses++;
+        g_map_diag.fat_sector_reads++;
+        if (vol->read_sectors(vol->ctx, fat_sector, count, g_fat_cache_buf) != count) {
+            cache->first_sector = FAT32RO_NO_CACHED_SECTOR;
+            cache->sector_count = 0;
             return FAT32RO_ERROR_READ_FAILED;
         }
-        cache->sector = fat_sector;
+        cache->first_sector = fat_sector;
+        cache->sector_count = (uint8_t)count;
+    } else {
+        g_map_diag.fat_cache_hits++;
     }
 
-    *out_next = read_u32le(cache->buf + entry_offset) & FAT32_ENTRY_MASK;
+    cache_index = fat_sector - cache->first_sector;
+    *out_next = read_u32le(g_fat_cache_buf
+        + cache_index * FAT32RO_SECTOR_BYTES + entry_offset) & FAT32_ENTRY_MASK;
     return FAT32RO_SUCCESS;
 }
 
@@ -82,6 +135,7 @@ typedef struct {
     uint8_t num_fats;
     uint32_t fat_size_32;
     uint32_t root_cluster;
+    uint32_t volume_serial;
     uint32_t total_sectors_32;
 } bpb_fields_t;
 
@@ -116,6 +170,7 @@ static bool parse_bpb(const uint8_t *sector, bpb_fields_t *out)
     out->num_fats = sector[16];
     out->fat_size_32 = read_u32le(sector + 36);
     out->root_cluster = read_u32le(sector + 44);
+    out->volume_serial = read_u32le(sector + 67);
     out->total_sectors_32 = read_u32le(sector + 32);
 
     if (out->bytes_per_sector != FAT32RO_SECTOR_BYTES) {
@@ -231,6 +286,8 @@ fat32ro_error_t fat32ro_mount(fat32ro_volume_t *vol,
         + (uint32_t)bpb.num_fats * bpb.fat_size_32;
     vol->sectors_per_cluster = bpb.sectors_per_cluster;
     vol->root_cluster = bpb.root_cluster;
+    /* CPE1 FIX: publish the parsed FAT32 BPB volume ID to the mounted volume. */
+    vol->volume_serial = bpb.volume_serial;
 
     {
         uint32_t system_sectors = bpb.reserved_sectors
@@ -281,7 +338,8 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
         return -(int)FAT32RO_ERROR_INVALID_PARAM;
     }
 
-    fat_cache.sector = FAT32RO_NO_CACHED_SECTOR;
+    fat_cache.first_sector = FAT32RO_NO_CACHED_SECTOR;
+    fat_cache.sector_count = 0;
 
     cluster = first_cluster;
     if (!cluster_is_valid_data_cluster(vol, cluster)) {
@@ -363,6 +421,45 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
     }
 }
 
+int fat32ro_list_directory_page(const fat32ro_volume_t *vol, uint32_t first_cluster,
+                                uint32_t skip_matches, fat32ro_dirent_t *out,
+                                int max_entries, fat32ro_dirent_filter_t filter,
+                                void *filter_ctx, bool *out_has_more)
+{
+    uint32_t cluster=first_cluster, steps=0, matched=0; int count=0;
+    fat_cache_t cache={FAT32RO_NO_CACHED_SECTOR,0};
+    if (!vol || !out || max_entries<=0 || !filter || !out_has_more)
+        return -(int)FAT32RO_ERROR_INVALID_PARAM;
+    *out_has_more=false;
+    if (!cluster_is_valid_data_cluster(vol,cluster)) return -(int)FAT32RO_ERROR_CLUSTER_CHAIN;
+    for (;;) {
+        uint8_t sic;
+        for (sic=0;sic<vol->sectors_per_cluster;++sic) {
+            uint8_t buf[FAT32RO_SECTOR_BYTES]; int n;
+            if (vol->read_sectors(vol->ctx,cluster_to_lba(vol,cluster)+sic,1,buf)!=1)
+                return -(int)FAT32RO_ERROR_READ_FAILED;
+            for (n=0;n<FAT32RO_SECTOR_BYTES/32;++n) {
+                const uint8_t *raw=buf+n*32; uint8_t first=raw[0],attr=raw[11]; fat32ro_dirent_t e;
+                if (first==0x00) return count;
+                if (first==0xE5 || (attr&0x0F)==0x0F || (attr&0x08) || raw[0]=='.') continue;
+                e.is_directory=(attr&0x10)!=0; format_short_name(raw,e.name);
+                e.first_cluster=((uint32_t)read_u16le(raw+20)<<16)|read_u16le(raw+26);
+                e.file_size=e.is_directory?0:read_u32le(raw+28);
+                if (!filter(&e,filter_ctx)) continue;
+                if (matched++ < skip_matches) continue;
+                if (count<max_entries) out[count++]=e;
+                else { *out_has_more=true; return count; }
+            }
+        }
+        { uint32_t next; fat32ro_error_t err;
+          if (++steps>vol->total_clusters) return -(int)FAT32RO_ERROR_CLUSTER_CHAIN;
+          err=read_fat_entry(vol,cluster,&cache,&next); if(err!=FAT32RO_SUCCESS)return -(int)err;
+          if(next>=FAT32_EOC_MIN)return count;
+          if(!cluster_is_valid_data_cluster(vol,next))return -(int)FAT32RO_ERROR_CLUSTER_CHAIN;
+          cluster=next; }
+    }
+}
+
 int fat32ro_list_root(const fat32ro_volume_t *vol, fat32ro_dirent_t *out, int max_entries)
 {
     if (vol == NULL) {
@@ -387,7 +484,10 @@ static bool cluster_already_used(const fat32ro_extent_map_t *out, const fat32ro_
     uint16_t i;
 
     for (i = 0; i < out->extent_count; ++i) {
-        uint32_t start_cluster = 2
+        uint32_t start_cluster;
+
+        g_map_diag.cycle_extent_comparisons++;
+        start_cluster = 2
             + (out->extents[i].lba - vol->first_data_sector) / vol->sectors_per_cluster;
         uint32_t length_clusters = out->extents[i].sectors / vol->sectors_per_cluster;
 
@@ -431,7 +531,8 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
         return FAT32RO_ERROR_INVALID_PARAM;
     }
 
-    fat_cache.sector = FAT32RO_NO_CACHED_SECTOR;
+    fat_cache.first_sector = FAT32RO_NO_CACHED_SECTOR;
+    fat_cache.sector_count = 0;
 
     out->extent_count = 0;
     out->total_sectors = 0;
@@ -458,6 +559,7 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
         if (++steps > vol->total_clusters) {
             return FAT32RO_ERROR_CLUSTER_CHAIN;
         }
+        g_map_diag.cluster_steps++;
 
         err = read_fat_entry(vol, cluster, &fat_cache, &next);
         if (err != FAT32RO_SUCCESS) {
@@ -521,3 +623,6 @@ bool fat32ro_extent_lookup(const fat32ro_extent_map_t *map, uint32_t sector_offs
 
     return false; /* unreachable if total_sectors is consistent with extents[] */
 }
+
+
+

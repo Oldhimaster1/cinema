@@ -1,3 +1,4 @@
+
 /* Tests for src/fat32ro.c against synthetic, hand-built FAT32 images
  * (a plain in-memory sector array plus a read_sectors callback) -- no
  * calculator, no real USB device, no real FAT32 volume needed. */
@@ -710,6 +711,45 @@ static void test_extent_map_too_fragmented_is_rejected_cleanly(void)
           "a file needing more than FAT32RO_MAX_EXTENTS runs is rejected, not overflowed");
 }
 
+static void test_extent_map_diagnostics_match_single_sector_cache(void)
+{
+    const uint32_t num_clusters = 260;
+    fs_layout_t l;
+    fat32ro_volume_t vol;
+    fat32ro_extent_map_t map;
+    fat32ro_map_diag_t diag;
+    uint32_t c;
+
+    l.base_lba = 0;
+    l.reserved_sectors = 1;
+    l.sectors_per_cluster = 1;
+    l.num_fats = 1;
+    l.fat_size_sectors = 4;
+    l.root_cluster = 2;
+    l.total_sectors = 1 + 4 + 10 + num_clusters + 10;
+    reset_disk();
+    format_disk(&l);
+    for (c = 10; c < 10 + num_clusters - 1; ++c) {
+        set_fat_entry(&l, c, c + 1);
+    }
+    set_fat_entry(&l, 10 + num_clusters - 1, 0x0FFFFFFF);
+
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
+          "diagnostic test volume mounts");
+    fat32ro_map_diag_reset();
+    CHECK(fat32ro_build_extent_map(&vol, 10, num_clusters * 512u, &map) == FAT32RO_SUCCESS,
+          "diagnostic contiguous map succeeds");
+    fat32ro_map_diag_get(&diag);
+    CHECK(diag.cluster_steps == num_clusters - 1,
+          "diagnostic cluster-step count matches chain links followed");
+    CHECK(diag.fat_cache_hits + diag.fat_cache_misses == diag.cluster_steps,
+          "every followed link is a FAT cache hit or miss");
+    CHECK(diag.fat_sector_reads == diag.fat_cache_misses,
+          "every FAT cache miss issues exactly one physical sector read");
+    CHECK(diag.fat_sector_reads == 1,
+          "four-sector FAT window maps the chain with one physical command");
+    CHECK(map.extent_count == 1, "diagnostics do not change extent coalescing");
+}
 /* --- extent lookup -------------------------------------------------------- */
 
 static void test_extent_lookup_across_boundaries(void)
@@ -763,6 +803,7 @@ int main(void)
     test_extent_map_rejects_premature_end_of_chain();
     test_extent_map_rejects_infinite_loop();
     test_extent_map_too_fragmented_is_rejected_cleanly();
+    test_extent_map_diagnostics_match_single_sector_cache();
 
     test_extent_lookup_across_boundaries();
 
@@ -773,3 +814,6 @@ int main(void)
     printf("%d test(s) failed.\n", g_failures);
     return 1;
 }
+
+
+

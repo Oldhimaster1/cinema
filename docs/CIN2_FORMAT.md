@@ -160,3 +160,8 @@ final XOR `0xFFFFFFFF` -- the same variant used by zlib/gzip/PNG. Both
 `tools/cin2_format.py` and `src/cin2.c` implement it independently from
 this spec; `tests/test_cin2_format.py` checks them against known test
 vectors.
+
+
+## Optional embedded placement extension (CPE1)
+
+CIN2 sector zero reserves bytes 64 through 383 for an optional destination-specific placement descriptor. The extension does not alter the ordinary CIN2 header CRC or move frame data from sector 1. Unprepared files leave the region zero-filled. Prepared files use magic `CPE1`, version 1, a prepared flag, FAT32 volume and movie identity fields, separate metadata and extent CRC-32 values, and up to 32 `{start_lba, sector_count}` entries. A player must reject the extension unless every identity, range, first-cluster, non-overlap, and sector-sum check succeeds. Rejection falls back to ordinary FAT mapping.

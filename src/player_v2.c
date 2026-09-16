@@ -1,7 +1,10 @@
 #include "player_v2.h"
+static player_v2_result_t g_player_v2_result=PLAYER_V2_INVALID;
+player_v2_result_t player_v2_last_result(void){return g_player_v2_result;}
 #include "fat32ro.h"
 #include "msd_util.h"
 #include "render_v2.h"
+#include "cinema_subtitle.h"
 
 #include <fileioc.h>
 #include <graphx.h>
@@ -21,7 +24,8 @@
  * doubling it. 2 slots is exactly the double-buffering depth Cinema's
  * v1 (legacy) player has always used successfully at this same frame
  * size, so this isn't a step into the unknown. */
-#define SLOT_COUNT 2
+#define PRIMARY_SLOT_COUNT 2
+#define MAX_SLOT_COUNT 3
 
 #define V2_Y_OFFSET ((GFX_LCD_HEIGHT - CINEMA_V2_DEST_HEIGHT) / 2)
 
@@ -87,7 +91,7 @@ typedef struct {
      * ez80 core, which cost more than the packing saved. width/height
      * are set once per slot, in player_v2_run(); nothing after that ever
      * changes them, so there's no per-frame header-writing cost either. */
-    uint8_t sprite_data[2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
+    uint8_t *sprite_data;
     uint32_t frame_number;
     volatile slot_state_t state;
     volatile msd_error_t error;
@@ -101,6 +105,11 @@ typedef struct {
     frame_part_t pending_parts[CINEMA_MAX_PARTS_PER_FRAME];
     uint8_t pending_part_count;
     uint8_t next_pending_part;
+    uint8_t frame_span;
+    uint8_t frames_consumed;
+    uint8_t present_index;
+    struct player_v2_t *owner;
+    clock_t read_submit_tick;
 } frame_slot_t;
 
 static gfx_sprite_t *slot_sprite(frame_slot_t *slot)
@@ -108,10 +117,21 @@ static gfx_sprite_t *slot_sprite(frame_slot_t *slot)
     return (gfx_sprite_t *)slot->sprite_data;
 }
 
-typedef struct {
+static uint8_t *g_packed_extra_storage;
+static uint32_t g_packed_extra_storage_size;
+
+void player_v2_set_packed_extra_storage(uint8_t *storage, uint32_t size)
+{
+    g_packed_extra_storage = storage;
+    g_packed_extra_storage_size = size;
+}
+
+typedef struct player_v2_t {
     global_t *global;
     const fat32ro_extent_map_t *movie_map;
-    frame_slot_t slots[SLOT_COUNT];
+    frame_slot_t slots[MAX_SLOT_COUNT];
+    uint8_t primary_storage[PRIMARY_SLOT_COUNT][2 + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT];
+    uint8_t slot_count;
 
     char filename[CIN2_RESUME_FILENAME_LEN]; /* "" for raw single-image mode */
 
@@ -123,6 +143,8 @@ typedef struct {
 
     uint32_t fps_num;
     uint32_t fps_den;
+    uint8_t format_flags;
+    uint8_t frame_sectors;
 
     clock_t start_tick;
     clock_t pause_tick;
@@ -133,6 +155,9 @@ typedef struct {
 
     uint32_t dropped_frames;
     uint32_t repeated_frames;
+    uint32_t session_frames_presented;
+    uint32_t max_schedule_lag;
+    clock_t playback_start_tick;
 
     /* --- stall / buffering feedback --- */
     clock_t last_progress_tick; /* clock() as of the last frame actually shown */
@@ -152,6 +177,57 @@ typedef struct {
     uint32_t fps_window_frames;
     clock_t fps_window_start;
     uint32_t fps_tenths;      /* measured presentation rate x10 */
+    uint32_t read_ticks_total;
+    uint32_t read_ticks_max;
+    uint32_t read_sectors_total;
+    uint32_t read_completions;
+    uint32_t read_submissions;
+    uint32_t reads_over_111ms;
+    uint32_t reads_over_250ms;
+    uint32_t reads_over_500ms;
+    uint32_t reads_over_1000ms;
+    uint32_t direct_map_hits;
+    uint32_t fragmented_frame_resolves;
+    uint32_t packed_pair_commands;
+    uint32_t packed_single_commands;
+    uint32_t max_concurrent_reads;
+    uint8_t active_reads;
+
+    const fat32ro_extent_map_t *subtitle_map;
+    uint32_t subtitle_size;
+    uint32_t subtitle_movie_id;
+    csu_header_t subtitle_header;
+    uint8_t *subtitle_sector;
+    uint32_t subtitle_cached_sector;
+    bool subtitle_sector_valid;
+    csu_cue_t subtitle_cue;
+    int32_t subtitle_cue_index;
+    bool subtitle_cue_valid;
+    bool subtitle_end_reached;
+    bool subtitle_available;
+    bool subtitles_enabled;
+    uint32_t subtitle_sector_reads;
+    uint32_t subtitle_runtime_validations;
+    int32_t subtitle_failure_index;
+    uint8_t subtitle_failure_reason;
+    bool menu_back_buffer_repair;
+    /* Validation-only read-ahead. This borrows the static packed/thumbnail
+     * scratch buffer before playback slots begin using it, so Phase 1 adds no
+     * stack pressure and no permanent BSS allocation. */
+    uint8_t *subtitle_bulk_buffer;
+    uint32_t subtitle_bulk_capacity;
+    uint32_t subtitle_bulk_first_sector;
+    uint32_t subtitle_bulk_sector_count;
+    bool subtitle_validation_mode;
+    uint32_t subtitle_validation_commands;
+    uint32_t subtitle_validation_sectors;
+    uint32_t subtitle_validation_max_sectors;
+    uint32_t subtitle_validation_extent_stops;
+    clock_t subtitle_validation_ticks;
+    int32_t subtitle_delay_ms;
+    uint8_t subtitle_style;
+    uint8_t subtitle_size_mode;
+    uint8_t subtitle_position;
 } player_v2_t;
 
 /* Callback only records what happened -- no graphics calls, no printing,
@@ -161,6 +237,18 @@ static void frame_read_callback(msd_error_t error, struct msd_transfer *xfer)
 {
     frame_slot_t *slot = (frame_slot_t *)xfer->userptr;
 
+    if (slot->owner != NULL) {
+        uint32_t elapsed = (uint32_t)(clock() - slot->read_submit_tick);
+        slot->owner->read_ticks_total += elapsed;
+        if (elapsed > slot->owner->read_ticks_max) slot->owner->read_ticks_max = elapsed;
+        if ((uint64_t)elapsed * 1000u > (uint64_t)CLOCKS_PER_SEC * 111u) slot->owner->reads_over_111ms++;
+        if ((uint64_t)elapsed * 1000u > (uint64_t)CLOCKS_PER_SEC * 250u) slot->owner->reads_over_250ms++;
+        if ((uint64_t)elapsed * 1000u > (uint64_t)CLOCKS_PER_SEC * 500u) slot->owner->reads_over_500ms++;
+        if ((uint64_t)elapsed * 1000u > (uint64_t)CLOCKS_PER_SEC * 1000u) slot->owner->reads_over_1000ms++;
+        slot->owner->read_completions++;
+        slot->owner->read_sectors_total += xfer->count;
+        if (slot->owner->active_reads > 0) slot->owner->active_reads--;
+    }
     slot->error = error;
     if (error != MSD_SUCCESS) {
         slot->state = SLOT_ERROR;
@@ -182,9 +270,22 @@ static void frame_read_callback(msd_error_t error, struct msd_transfer *xfer)
 static bool resolve_frame_parts(const fat32ro_extent_map_t *map, uint32_t frame_number,
                                  frame_slot_t *slot)
 {
-    uint32_t sector_offset = cin2_frame_lba(frame_number);
-    uint32_t remaining = CIN2_FRAME_SECTORS;
+    uint32_t sector_offset = cin2_frame_lba_for(frame_number, slot->owner->format_flags);
+    uint32_t remaining = (uint32_t)slot->owner->frame_sectors * slot->frame_span;
     uint8_t count = 0;
+
+    /* Most prepared/cached movies are one physical extent. Avoid the generic
+     * 256-entry lookup loop and part builder for this hot per-frame case. */
+    if (map->extent_count == 1 && sector_offset < map->extents[0].sectors
+        && remaining <= map->extents[0].sectors - sector_offset) {
+        slot->pending_parts[0].lba = map->extents[0].lba + sector_offset;
+        slot->pending_parts[0].sectors = remaining;
+        slot->pending_part_count = 1;
+        slot->next_pending_part = 0;
+        if (slot->owner != NULL) slot->owner->direct_map_hits++;
+        return true;
+    }
+    if (slot->owner != NULL) slot->owner->fragmented_frame_resolves++;
 
     while (remaining > 0) {
         uint32_t lba, run;
@@ -234,8 +335,16 @@ static msd_error_t queue_slot_part(global_t *global, frame_slot_t *slot)
     slot->transfer.userptr = slot;
 
     slot->state = SLOT_LOADING;
+    slot->read_submit_tick = clock();
+    if (slot->owner != NULL) {
+        slot->owner->read_submissions++;
+        slot->owner->active_reads++;
+        if (slot->owner->active_reads > slot->owner->max_concurrent_reads)
+            slot->owner->max_concurrent_reads = slot->owner->active_reads;
+    }
     result = msd_ReadAsync(&slot->transfer);
     if (result != MSD_SUCCESS) {
+        if (slot->owner != NULL && slot->owner->active_reads > 0) slot->owner->active_reads--;
         slot->error = result;
         slot->state = SLOT_ERROR;
     }
@@ -248,13 +357,30 @@ static msd_error_t queue_frame(global_t *global, const fat32ro_extent_map_t *map
 {
     slot->frame_number = frame_number;
     slot->error = MSD_SUCCESS;
+    slot->frames_consumed = 0;
+    slot->present_index = 0;
+    slot->frame_span = ((slot->owner->format_flags & CIN2_FLAG_PACKED4)
+        && frame_number + 1u < slot->owner->frame_count) ? 2u : 1u;
 
     if (!resolve_frame_parts(map, frame_number, slot)) {
+        /* A fragmented extent boundary may make the two-frame request exceed
+         * the bounded part list. Fall back safely to one packed frame. */
+        if (slot->frame_span == 2u) {
+            slot->frame_span = 1u;
+            if (resolve_frame_parts(map, frame_number, slot)) {
+                slot->owner->packed_single_commands++;
+                return queue_slot_part(global, slot);
+            }
+        }
         slot->error = MSD_ERROR_INVALID_PARAM;
         slot->state = SLOT_ERROR;
         return MSD_ERROR_INVALID_PARAM;
     }
 
+    if (slot->owner->format_flags & CIN2_FLAG_PACKED4) {
+        if (slot->frame_span == 2u) slot->owner->packed_pair_commands++;
+        else slot->owner->packed_single_commands++;
+    }
     return queue_slot_part(global, slot);
 }
 
@@ -275,11 +401,26 @@ static msd_error_t queue_frame(global_t *global, const fat32ro_extent_map_t *map
  * this way. The exact mechanism was never pinned down further, but the
  * cost of this is one extra call per slot (SLOT_COUNT of them, at most),
  * which is negligible next to the read itself. */
+static bool any_slot_loading(const player_v2_t *player)
+{
+    uint8_t i;
+    for (i = 0; i < player->slot_count; ++i)
+        if (player->slots[i].state == SLOT_LOADING) return true;
+    return false;
+}
+
 static bool refill_empty_slots(player_v2_t *player)
 {
     uint8_t i;
 
-    for (i = 0; i < SLOT_COUNT; ++i) {
+    /* msddrvce is most stable and fastest with one bulk command in flight.
+     * The old loop could keep both 30-sector slot transfers outstanding,
+     * which physical Cars telemetry showed collapsing sustained throughput.
+     * Double buffering is retained: one READY frame can render while one
+     * transfer progresses, but never two competing USB commands. */
+    if (any_slot_loading(player)) return true;
+
+    for (i = 0; i < player->slot_count; ++i) {
         frame_slot_t *slot = &player->slots[i];
 
         if (slot->state == SLOT_NEEDS_NEXT_PART) {
@@ -287,7 +428,7 @@ static bool refill_empty_slots(player_v2_t *player)
                 return false;
             }
             usb_HandleEvents();
-            continue;
+            return true;
         }
 
         if (slot->state != SLOT_EMPTY) {
@@ -303,7 +444,8 @@ static bool refill_empty_slots(player_v2_t *player)
         }
         usb_HandleEvents();
 
-        player->next_frame_to_queue++;
+        player->next_frame_to_queue += slot->frame_span;
+        return true;
     }
 
     return true;
@@ -313,7 +455,7 @@ static frame_slot_t *find_failed_slot(player_v2_t *player)
 {
     uint8_t i;
 
-    for (i = 0; i < SLOT_COUNT; ++i) {
+    for (i = 0; i < player->slot_count; ++i) {
         if (player->slots[i].state == SLOT_ERROR) {
             return &player->slots[i];
         }
@@ -329,7 +471,8 @@ static frame_slot_t *find_failed_slot(player_v2_t *player)
  * serialized_fill_slots for why that matters. context is just for
  * error messages ("prefill" or "seek"). */
 static bool serialized_fill_slot(player_v2_t *player, frame_slot_t *slot,
-                                   uint32_t frame_number, const char *context)
+                                   uint32_t frame_number, const char *context,
+                                   bool allow_user_cancel)
 {
     char buffer[40];
 
@@ -361,7 +504,13 @@ static bool serialized_fill_slot(player_v2_t *player, frame_slot_t *slot,
             putstr("usb device disconnected");
             return false;
         }
-        if (os_GetCSC()) {
+        /* Initial prefill may still be canceled by a key. A seek refill must
+         * not poll the keyboard here: the key that requested the seek can
+         * legitimately remain held while the synchronous refill runs. Treating
+         * that same held key as cancellation made player_seek_to_frame return
+         * false, which the playback loop classified as fatal and followed with
+         * the normal post-playback diagnostics pages. */
+        if (allow_user_cancel && os_GetCSC()) {
             return false;
         }
     }
@@ -379,11 +528,12 @@ static bool serialized_fill_slot(player_v2_t *player, frame_slot_t *slot,
  * called once per main-loop iteration) is left as it was: it only
  * rarely needs to queue more than one slot per call, so the same risk
  * doesn't really apply there. */
-static bool serialized_fill_slots(player_v2_t *player, const char *context)
+static bool serialized_fill_slots(player_v2_t *player, const char *context,
+                                    bool allow_user_cancel)
 {
     uint8_t i;
 
-    for (i = 0; i < SLOT_COUNT; ++i) {
+    for (i = 0; i < player->slot_count; ++i) {
         frame_slot_t *slot = &player->slots[i];
 
         if (slot->state == SLOT_ERROR) {
@@ -393,10 +543,11 @@ static bool serialized_fill_slots(player_v2_t *player, const char *context)
             break;
         }
 
-        if (!serialized_fill_slot(player, slot, player->next_frame_to_queue, context)) {
+        if (!serialized_fill_slot(player, slot, player->next_frame_to_queue,
+                                  context, allow_user_cancel)) {
             return false;
         }
-        player->next_frame_to_queue++;
+        player->next_frame_to_queue += slot->frame_span;
     }
 
     return true;
@@ -407,17 +558,20 @@ static bool serialized_fill_slots(player_v2_t *player, const char *context)
  * frame the original player waited for. */
 static bool prefill_frames(player_v2_t *player)
 {
-    return serialized_fill_slots(player, "prefill");
+    return serialized_fill_slots(player, "prefill", true);
 }
 
 static frame_slot_t *find_ready_frame(player_v2_t *player, uint32_t wanted)
 {
     uint8_t i;
 
-    for (i = 0; i < SLOT_COUNT; ++i) {
+    for (i = 0; i < player->slot_count; ++i) {
         frame_slot_t *slot = &player->slots[i];
 
-        if (slot->state == SLOT_READY && slot->frame_number == wanted) {
+        if (slot->state == SLOT_READY
+            && wanted >= slot->frame_number + slot->frames_consumed
+            && wanted < slot->frame_number + slot->frame_span) {
+            slot->present_index = (uint8_t)(wanted - slot->frame_number);
             return slot;
         }
     }
@@ -612,7 +766,7 @@ static void drain_loading_slots(player_v2_t *player)
         bool any_loading = false;
         uint8_t i;
 
-        for (i = 0; i < SLOT_COUNT; ++i) {
+        for (i = 0; i < player->slot_count; ++i) {
             if (player->slots[i].state == SLOT_LOADING) {
                 any_loading = true;
                 break;
@@ -635,6 +789,8 @@ static void drain_loading_slots(player_v2_t *player)
  * the slots the seek just invalidated (mirroring prefill_frames' fatal
  * error handling) -- player_v2_loop treats that exactly like any other
  * fatal error and stops. */
+static void subtitle_invalidate_cue(player_v2_t *player);
+
 static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
 {
     uint8_t i;
@@ -648,7 +804,7 @@ static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
 
     drain_loading_slots(player);
 
-    for (i = 0; i < SLOT_COUNT; ++i) {
+    for (i = 0; i < player->slot_count; ++i) {
         /* SLOT_ERROR is left intact: the main loop still has to observe
          * and report it. Everything else is safe to reuse now that no
          * transfer is outstanding. */
@@ -662,6 +818,7 @@ static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
     player->start_tick = clock();
     player->last_progress_tick = player->start_tick;
     player->accumulated_pause_ticks = 0;
+    subtitle_invalidate_cue(player);
     /* A seek always resumes playback (standard player behavior, and it
      * sidesteps a real gap otherwise: the paused path only repaints via
      * the OSD overlay on the still-visible old frame, since the slot
@@ -689,7 +846,7 @@ static bool player_seek_to_frame(player_v2_t *player, uint32_t target)
      * one-pass refill_empty_slots() call) avoids the same back-to-back
      * multi-transfer burst that prefill_frames now avoids. See
      * serialized_fill_slots. */
-    return serialized_fill_slots(player, "seek");
+    return serialized_fill_slots(player, "seek", false);
 }
 
 static bool player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
@@ -707,6 +864,313 @@ static bool player_seek_seconds(player_v2_t *player, int32_t delta_seconds)
 
         return player_seek_to_frame(player, target >= player->frame_count
             ? player->frame_count - 1 : (uint32_t)target);
+    }
+}
+
+
+#define SUBTITLE_BULK_SECTORS 16u
+#define SUBTITLE_BULK_BYTES (SUBTITLE_BULK_SECTORS * 512u)
+
+static bool subtitle_stream_read_single_sector(void *ctx,uint32_t offset,uint8_t *out,size_t size)
+{
+    player_v2_t *player=(player_v2_t *)ctx;
+    if(!player||!player->subtitle_sector)return false;
+    while(size){
+        uint32_t sector=offset/512u,in=offset%512u,lba,run;
+        size_t take=512u-in;
+        if(take>size)take=size;
+
+        if(player->subtitle_validation_mode&&player->subtitle_bulk_buffer
+           &&player->subtitle_bulk_capacity>=512u){
+            bool hit=player->subtitle_bulk_sector_count!=0u
+                &&sector>=player->subtitle_bulk_first_sector
+                &&sector-player->subtitle_bulk_first_sector<player->subtitle_bulk_sector_count;
+            if(!hit){
+                uint32_t total_sectors=(player->subtitle_size+511u)/512u;
+                uint32_t count;
+                if(player->global->usb==NULL
+                   ||!fat32ro_extent_lookup(player->subtitle_map,sector,&lba,&run))return false;
+                count=player->subtitle_bulk_capacity/512u;
+                if(count>SUBTITLE_BULK_SECTORS)count=SUBTITLE_BULK_SECTORS;
+                if(count>run){count=run;player->subtitle_validation_extent_stops++;}
+                if(count>total_sectors-sector)count=total_sectors-sector;
+                if(count==0u||msd_Read(&player->global->msd,lba,count,
+                                       player->subtitle_bulk_buffer)!=count)return false;
+                player->subtitle_bulk_first_sector=sector;
+                player->subtitle_bulk_sector_count=count;
+                player->subtitle_validation_commands++;
+                player->subtitle_validation_sectors+=count;
+                if(count>player->subtitle_validation_max_sectors)
+                    player->subtitle_validation_max_sectors=count;
+            }
+            {
+                uint32_t cached=sector-player->subtitle_bulk_first_sector;
+                memcpy(out,player->subtitle_bulk_buffer+cached*512u+in,take);
+            }
+        }else{
+            if(!player->subtitle_sector_valid||player->subtitle_cached_sector!=sector){
+                /* Never submit a synchronous sidecar command on top of an async movie command. */
+                drain_loading_slots(player);
+                if(player->global->usb==NULL
+                   ||!fat32ro_extent_lookup(player->subtitle_map,sector,&lba,&run)
+                   ||msd_Read(&player->global->msd,lba,1,player->subtitle_sector)!=1)return false;
+                player->subtitle_cached_sector=sector;player->subtitle_sector_valid=true;
+                player->subtitle_sector_reads++;
+            }
+            memcpy(out,player->subtitle_sector+in,take);
+        }
+        out+=take;offset+=(uint32_t)take;size-=take;
+    }
+    return true;
+}
+
+/* CINEMA_SUBTITLE_V15_CROSS_SECTOR
+ * Arbitrary CSU byte reads are split at physical 512-byte boundaries.
+ * Each chunk is delegated to the original cache-aware one-sector reader,
+ * preserving extent mapping, cache reuse, serialized USB access, and the
+ * existing subtitle_sector_reads counter. */
+#ifdef CINEMA_DIAGNOSTIC
+static uint32_t g_subtitle_read_requests;
+static uint32_t g_subtitle_cross_sector_requests;
+static uint32_t g_subtitle_read_bytes;
+static uint32_t g_subtitle_draw_calls;
+static uint32_t g_subtitle_active_frames;
+static uint32_t g_subtitle_toggle_count;
+static uint8_t g_subtitle_open_stage;
+#endif
+
+static bool subtitle_stream_read(void *ctx, uint32_t offset,
+                                 uint8_t *out, size_t size)
+{
+    size_t remaining = size;
+#ifdef CINEMA_DIAGNOSTIC
+    g_subtitle_read_requests++;
+    g_subtitle_read_bytes += (uint32_t)size;
+    if (size > 0u && (offset / 512u) != ((offset + (uint32_t)size - 1u) / 512u)) {
+        g_subtitle_cross_sector_requests++;
+    }
+#endif
+    while (remaining > 0u) {
+        uint32_t within = offset & 511u;
+        size_t chunk = 512u - (size_t)within;
+        if (chunk > remaining) {
+            chunk = remaining;
+        }
+        if (!subtitle_stream_read_single_sector(ctx, offset, out, chunk)) {
+            return false;
+        }
+        offset += (uint32_t)chunk;
+        out += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static void subtitle_invalidate_cue(player_v2_t *player)
+{
+    player->subtitle_cue_valid=false;
+    player->subtitle_cue_index=-1;
+    player->subtitle_end_reached=false;
+}
+
+enum { SUB_FAIL_NONE=0, SUB_FAIL_READ=1, SUB_FAIL_BOUNDS=2, SUB_FAIL_ORDER=3 };
+static void subtitle_fail(player_v2_t *player,int32_t index,uint8_t reason)
+{
+    player->subtitle_failure_index=index;
+    player->subtitle_failure_reason=reason;
+    player->subtitle_available=false;
+    player->subtitles_enabled=false;
+    subtitle_invalidate_cue(player);
+}
+static bool subtitle_read_validated_cue(player_v2_t *player,uint32_t index,
+                                        const csu_cue_t *previous,csu_cue_t *out)
+{
+    if(index>=player->subtitle_header.cue_count
+       ||!csu_stream_read_cue(out,subtitle_stream_read,player,index)){
+        subtitle_fail(player,(int32_t)index,SUB_FAIL_READ);return false;
+    }
+    player->subtitle_runtime_validations++;
+    if(out->end_frame>player->frame_count){
+        subtitle_fail(player,(int32_t)index,SUB_FAIL_BOUNDS);return false;
+    }
+    if(previous!=NULL&&out->start_frame<previous->end_frame){
+        subtitle_fail(player,(int32_t)index,SUB_FAIL_ORDER);return false;
+    }
+    if(previous==NULL&&index>0u){
+        csu_cue_t prev;
+        if(!csu_stream_read_cue(&prev,subtitle_stream_read,player,index-1u)){
+            subtitle_fail(player,(int32_t)index,SUB_FAIL_READ);return false;
+        }
+        player->subtitle_runtime_validations++;
+        if(prev.end_frame>player->frame_count||out->start_frame<prev.end_frame){
+            subtitle_fail(player,(int32_t)index,SUB_FAIL_ORDER);return false;
+        }
+    }
+    return true;
+}
+
+static bool subtitle_locate(player_v2_t *player,uint32_t frame)
+{
+    int32_t i;
+    if(!player->subtitle_available||player->subtitle_end_reached)return false;
+
+    if(player->subtitle_cue_valid){
+        /* A future cue is useful cached state.  Every frame in the gap before
+         * it must return without touching USB. */
+        if(frame<player->subtitle_cue.start_frame)return false;
+        if(frame<player->subtitle_cue.end_frame)return true;
+
+        /* Sequential presentation normally advances one cue at a time.  Keep
+         * walking only if a frame jump crossed multiple short cues. */
+        while(player->subtitle_cue_index+1<(int32_t)player->subtitle_header.cue_count){
+            csu_cue_t next;
+            if(!subtitle_read_validated_cue(player,
+                    (uint32_t)(player->subtitle_cue_index+1),&player->subtitle_cue,&next))
+                return false;
+            player->subtitle_cue=next;
+            player->subtitle_cue_index++;
+            if(frame<next.start_frame)return false;
+            if(frame<next.end_frame)return true;
+        }
+        player->subtitle_cue_valid=false;
+        player->subtitle_end_reached=true;
+        return false;
+    }
+
+    /* Initial playback and post-seek lookup: find either the active cue or
+     * the next future cue.  Caching a future cue eliminates repeated binary
+     * searches throughout subtitle-free intervals. */
+    i=csu_stream_find_at_or_after(&player->subtitle_header,
+                                  subtitle_stream_read,player,frame);
+    if(i==-1){
+        player->subtitle_end_reached=true;
+        return false;
+    }
+    if(i<0||!subtitle_read_validated_cue(player,(uint32_t)i,NULL,
+                                          &player->subtitle_cue)) return false;
+    player->subtitle_cue_index=i;
+    player->subtitle_cue_valid=true;
+    return frame>=player->subtitle_cue.start_frame
+        &&frame<player->subtitle_cue.end_frame;
+}
+#define SUB_STYLE_BOX 0u
+#define SUB_STYLE_COMPACT 1u
+#define SUB_STYLE_TEXT 2u
+#define SUB_SIZE_NORMAL 0u
+#define SUB_SIZE_TIGHT 1u
+#define SUB_POS_BOTTOM 0u
+#define SUB_POS_TOP 1u
+
+static uint32_t subtitle_adjusted_frame(const player_v2_t *player,uint32_t frame)
+{
+    int64_t delta=(int64_t)player->subtitle_delay_ms*player->fps_num;
+    int64_t divisor=(int64_t)1000*player->fps_den;
+    int64_t adjusted;
+    if(delta>=0)delta=(delta+divisor/2)/divisor;
+    else delta=-((-delta+divisor/2)/divisor);
+    /* Positive delay means show text later, so inspect an earlier subtitle time. */
+    adjusted=(int64_t)frame-delta;
+    if(adjusted<0)return 0;
+    if(adjusted>=(int64_t)player->frame_count)return player->frame_count-1;
+    return (uint32_t)adjusted;
+}
+
+static void draw_centered_subtitle_line(player_v2_t *player,const char *text,uint8_t y)
+{
+    uint24_t width=(uint24_t)strlen(text)*8u;
+    uint24_t x=width<GFX_LCD_WIDTH?(GFX_LCD_WIDTH-width)/2:0;
+    uint8_t pad=player->subtitle_size_mode==SUB_SIZE_TIGHT?1u:2u;
+    uint24_t box_x=x>pad?x-pad:0;
+    uint24_t box_w=width+2u*pad;
+    if(box_w>GFX_LCD_WIDTH)box_w=GFX_LCD_WIDTH;
+    if(player->subtitle_style!=SUB_STYLE_TEXT){
+        gfx_SetColor(player->osd_bg);
+        gfx_FillRectangle_NoClip(box_x,y>pad?y-pad:0,box_w,8u+2u*pad);
+    }else{
+        /* One cheap shadow draw gives legibility without a full box. */
+        gfx_SetTextFGColor(player->osd_bg);
+        gfx_PrintStringXY(text,x+1u,y+1u);
+    }
+    gfx_SetTextFGColor(player->osd_fg);
+    gfx_PrintStringXY(text,x,y);
+}
+
+static void draw_subtitle(player_v2_t *player,uint32_t frame)
+{
+#ifdef CINEMA_DIAGNOSTIC
+    g_subtitle_draw_calls++;
+#endif
+    const csu_cue_t *cue;
+    uint32_t lookup;
+    uint8_t y1,y2;
+    if(!player->subtitle_available||!player->subtitles_enabled)return;
+    lookup=subtitle_adjusted_frame(player,frame);
+    if(!subtitle_locate(player,lookup))return;
+    cue=&player->subtitle_cue;
+    if(player->subtitle_position==SUB_POS_TOP){y1=V2_Y_OFFSET+4u;y2=V2_Y_OFFSET+14u;}
+    else {y1=V2_Y_OFFSET+CINEMA_V2_DEST_HEIGHT-22u;y2=V2_Y_OFFSET+CINEMA_V2_DEST_HEIGHT-12u;}
+    if(player->subtitle_size_mode==SUB_SIZE_TIGHT){if(player->subtitle_position==SUB_POS_TOP)y2=y1+9u;else y1=y2-9u;}
+    if(cue->line_count==2){
+#ifdef CINEMA_DIAGNOSTIC
+        g_subtitle_active_frames++;
+#endif
+        draw_centered_subtitle_line(player,cue->line1,y1);
+        draw_centered_subtitle_line(player,cue->line2,y2);
+    }else draw_centered_subtitle_line(player,cue->line1,y2);
+}
+
+static const char *subtitle_style_name(uint8_t v)
+{return v==SUB_STYLE_COMPACT?"COMPACT":v==SUB_STYLE_TEXT?"TEXT":"BOX";}
+static const char *subtitle_spacing_name(uint8_t v)
+{return v==SUB_SIZE_TIGHT?"TIGHT":"NORMAL";}
+static const char *subtitle_position_name(uint8_t v)
+{return v==SUB_POS_TOP?"TOP":"BOTTOM";}
+
+static void subtitle_options_draw(player_v2_t *player,uint8_t row)
+{
+    char line[40];
+    gfx_SetDrawScreen();gfx_SetColor(player->osd_bg);gfx_FillRectangle_NoClip(0,0,GFX_LCD_WIDTH,GFX_LCD_HEIGHT);gfx_SetTextFGColor(player->osd_fg);
+    gfx_PrintStringXY("SUBTITLE OPTIONS",8,8);
+    snprintf(line,sizeof(line),"%c Delay: %+ld ms",row==0?'>':' ',(long)player->subtitle_delay_ms);gfx_PrintStringXY(line,8,30);
+    snprintf(line,sizeof(line),"%c Style: %s",row==1?'>':' ',subtitle_style_name(player->subtitle_style));gfx_PrintStringXY(line,8,44);
+    snprintf(line,sizeof(line),"%c Spacing: %s",row==2?'>':' ',subtitle_spacing_name(player->subtitle_size_mode));gfx_PrintStringXY(line,8,58);
+    snprintf(line,sizeof(line),"%c Position: %s",row==3?'>':' ',subtitle_position_name(player->subtitle_position));gfx_PrintStringXY(line,8,72);
+    gfx_PrintStringXY("Up/Down select",8,96);gfx_PrintStringXY("Left/Right change",8,108);
+    gfx_PrintStringXY("0 reset  Del exit",8,120);
+    gfx_PrintStringXY("Y= toggles subtitles",8,136);
+    gfx_PrintStringXY("2nd pauses  Clear exits",8,148);
+}
+
+static void subtitle_options_menu(player_v2_t *player)
+{
+    uint8_t row=0,key;
+    bool changed=false;
+    drain_loading_slots(player);
+    do{
+        subtitle_options_draw(player,row);
+        do{usb_HandleEvents();key=os_GetCSC();}while(!key&&player->global->usb!=NULL);
+        if(player->global->usb==NULL)break;
+        if(key==sk_Up&&row)row--;
+        else if(key==sk_Down&&row<3)row++;
+        else if(key==sk_0){player->subtitle_delay_ms=0;player->subtitle_style=SUB_STYLE_BOX;player->subtitle_size_mode=SUB_SIZE_NORMAL;player->subtitle_position=SUB_POS_BOTTOM;changed=true;}
+        else if(key==sk_Left||key==sk_Right){
+            int dir=key==sk_Right?1:-1;
+            if(row==0){player->subtitle_delay_ms+=dir*100;if(player->subtitle_delay_ms>10000)player->subtitle_delay_ms=10000;if(player->subtitle_delay_ms< -10000)player->subtitle_delay_ms=-10000;}
+            else if(row==1)player->subtitle_style=(uint8_t)((player->subtitle_style+3u+dir)%3u);
+            else if(row==2)player->subtitle_size_mode^=1u;
+            else player->subtitle_position^=1u;
+            changed=true;
+        }
+    }while(key!=sk_Del&&key!=sk_Clear);
+    if(changed)subtitle_invalidate_cue(player);
+    gfx_SetDrawBuffer();
+    player->osd_clear_pending=2;
+    player->osd_was_visible=false;
+    /* Repaint a real movie frame after the menu, even if playback was paused. */
+    if(player->has_presented){
+        player->pause_after_render=player->paused;
+        player->menu_back_buffer_repair=true;
+        player_seek_to_frame(player,player->last_frame_presented);
     }
 }
 
@@ -730,7 +1194,11 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
 #if CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
     render_scaled_fixed_c(slot_sprite(slot)->data);
 #elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
-    render_scaled_fixed_asm(slot_sprite(slot)->data);
+    if (player->format_flags & CIN2_FLAG_PACKED4)
+        render_scaled_packed4_asm(slot_sprite(slot)->data
+            + (uint32_t)slot->present_index * CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT / 2u);
+    else
+        render_scaled_fixed_asm(slot_sprite(slot)->data);
 #else
     render_scaled_graphx((const struct gfx_sprite_t *)slot_sprite(slot));
 #endif
@@ -741,6 +1209,8 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
      * specifically, separate from USB read time. */
     player->decode_ticks_total += (uint32_t)(clock() - decode_start);
     player->decode_samples++;
+
+    draw_subtitle(player, slot->frame_number + slot->present_index);
 
     {
         bool showing = osd_should_draw(player);
@@ -782,6 +1252,14 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
      * only removes the case where we blocked for no reason while a
      * background USB read could have been making progress instead. */
     gfx_SwapDraw();
+    if(player->menu_back_buffer_repair){
+        /* The swap above makes the freshly restored movie frame visible.
+         * Copy that exact completed screen into the other draw buffer so the
+         * next swap cannot reveal stale SUBTITLE OPTIONS pixels. */
+        gfx_BlitScreen();
+        player->menu_back_buffer_repair=false;
+    }
+    player->session_frames_presented++;
 
     player->fps_window_frames++;
     {
@@ -796,7 +1274,7 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
     }
 }
 
-static void save_resume_state(const player_v2_t *player)
+static bool save_resume_state(const player_v2_t *player)
 {
     uint8_t var;
     uint8_t store[CIN2_RESUME_STORE_BYTES];
@@ -804,7 +1282,7 @@ static void save_resume_state(const player_v2_t *player)
     int slot;
 
     if (!player->has_presented) {
-        return;
+        return false;
     }
 
     /* Read-modify-write: ti_Write always rewrites the whole appvar, and
@@ -829,56 +1307,301 @@ static void save_resume_state(const player_v2_t *player)
     slot = cin2_resume_store_slot_for(store, player->filename);
     cin2_resume_store_write_slot(store, slot, &state);
 
+
     var = ti_Open(APPVAR_V2, "w");
     if (var) {
-        ti_SetGCBehavior(NULL, NULL);
+        bool wrote;
         ti_SetArchiveStatus(0, var);
-        ti_Write(store, 1, sizeof(store), var);
-        ti_SetArchiveStatus(1, var);
+        wrote = ti_Write(store, 1, sizeof(store), var) == sizeof(store);
+        if (wrote) ti_SetArchiveStatus(1, var);
         ti_Close(var);
+        if (wrote) {
+            uint8_t verify[CIN2_RESUME_STORE_BYTES];
+            var=ti_Open(APPVAR_V2,"r");
+            if(var){bool same=ti_Read(verify,1,sizeof(verify),var)==sizeof(verify)&&memcmp(verify,store,sizeof(store))==0;ti_Close(var);return same;}
+        }
     }
+    return false;
+}
+
+static void diagnostic_wait_key(void)
+{
+#if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM
+    /* Host simulations do not provide an interactive post-playback key.
+     * Do not block their deterministic test sequence. The physical
+     * fixed-ASM calculator build retains full release/press/release
+     * debouncing below. */
+    return;
+#else
+    while (os_GetCSC()) { }
+    while (!os_GetCSC()) { }
+    while (os_GetCSC()) { }
+#endif
 }
 
 static void print_playback_summary(const player_v2_t *player)
 {
     char buffer[64];
+    uint32_t active = 1;
+    uint32_t actual10 = 0;
+    uint32_t target10 = (uint32_t)(((uint64_t)player->fps_num * 10u) / player->fps_den);
+    uint32_t read_avg_whole = 0, read_avg_frac = 0;
+    uint32_t read_max_whole = 0, read_max_frac = 0;
+    uint32_t decode_avg_whole = 0, decode_avg_frac = 0;
+    uint32_t kib10 = 0;
 
-    /* Routing proof: which renderer actually ran, and how many times it
-     * (specifically -- see render_v2.h's routing-proof comment) was
-     * called, printed unconditionally so a physical test never has to
-     * infer this from timing numbers alone. */
-    sprintf(buffer, "renderer: %s (id %d) calls: %lu", CINEMA_RENDERER_ACTIVE_NAME,
-            CINEMA_RENDERER_ACTIVE_ID,
-            (unsigned long)g_render_calls[CINEMA_RENDERER_ACTIVE_ID]);
-    putstr(buffer);
-
-    sprintf(buffer, "frames shown: %lu", (unsigned long)(player->has_presented
-        ? player->last_frame_presented + 1 : 0));
-    putstr(buffer);
-    sprintf(buffer, "dropped: %lu  repeated: %lu",
-            (unsigned long)player->dropped_frames,
-            (unsigned long)player->repeated_frames);
-    putstr(buffer);
-
-    /* Decode cost is the number to watch when tuning playback speed: it
-     * is the per-frame CPU work the player itself controls, separate
-     * from however long the USB reads take. */
-    if (player->decode_samples > 0) {
-        uint32_t avg_ticks = player->decode_ticks_total / player->decode_samples;
-        uint32_t avg_us = (uint32_t)(((uint64_t)avg_ticks * 1000000u)
-                                      / CLOCKS_PER_SEC);
-
-        sprintf(buffer, "decode avg: %lu.%03lu ms (%lu frames)",
-                (unsigned long)(avg_us / 1000u),
-                (unsigned long)(avg_us % 1000u),
-                (unsigned long)player->decode_samples);
-        putstr(buffer);
-        if (avg_us > 0) {
-            sprintf(buffer, "decode ceiling: ~%lu fps",
-                    (unsigned long)(1000000u / avg_us));
-            putstr(buffer);
+    if (player->session_frames_presented && clock() > player->playback_start_tick) {
+        active = (uint32_t)(clock() - player->playback_start_tick
+                            - player->accumulated_pause_ticks);
+        if (!active) active = 1;
+        actual10 = (uint32_t)(((uint64_t)player->session_frames_presented
+                               * 10u * CLOCKS_PER_SEC) / active);
+    }
+    if (player->read_submissions) {
+        uint64_t avg1000 = (uint64_t)player->read_ticks_total * 1000u
+                            / player->read_submissions;
+        avg1000 = avg1000 * 1000u / CLOCKS_PER_SEC;
+        read_avg_whole = (uint32_t)(avg1000 / 1000u);
+        read_avg_frac = (uint32_t)(avg1000 % 1000u);
+        {
+            uint64_t max1000 = (uint64_t)player->read_ticks_max * 1000000u
+                                / CLOCKS_PER_SEC;
+            read_max_whole = (uint32_t)(max1000 / 1000u);
+            read_max_frac = (uint32_t)(max1000 % 1000u);
         }
     }
+    if (player->decode_samples) {
+        uint64_t davg1000 = (uint64_t)player->decode_ticks_total * 1000000u
+                             / player->decode_samples / CLOCKS_PER_SEC;
+        decode_avg_whole = (uint32_t)(davg1000 / 1000u);
+        decode_avg_frac = (uint32_t)(davg1000 % 1000u);
+    }
+    if (player->read_ticks_total) {
+        kib10 = (uint32_t)(((uint64_t)player->read_sectors_total * 512u
+                            * 10u * CLOCKS_PER_SEC)
+                           / player->read_ticks_total / 1024u);
+    }
+
+    /* Page 1: exactly nine printed lines. */
+    os_ClrHome();
+    putstr("DIAGNOSTICS 1/2");
+    sprintf(buffer, "renderer id %u calls %lu", (unsigned)CINEMA_RENDERER_ACTIVE_ID,
+            (unsigned long)g_render_calls[CINEMA_RENDERER_ACTIVE_ID]); putstr(buffer);
+    sprintf(buffer, "session renders %lu", (unsigned long)player->session_frames_presented); putstr(buffer);
+    sprintf(buffer, "movie position %lu", (unsigned long)(player->has_presented
+            ? player->last_frame_presented + 1u : 0u)); putstr(buffer);
+    sprintf(buffer, "actual %lu.%lu target %lu.%lu", (unsigned long)(actual10 / 10u),
+            (unsigned long)(actual10 % 10u), (unsigned long)(target10 / 10u),
+            (unsigned long)(target10 % 10u)); putstr(buffer);
+    sprintf(buffer, "speed %lu.%02lux lag %lu", (unsigned long)(target10 ? actual10 * 100u / target10 / 100u : 0u),
+            (unsigned long)(target10 ? actual10 * 100u / target10 % 100u : 0u),
+            (unsigned long)player->max_schedule_lag); putstr(buffer);
+    sprintf(buffer, "drop %lu wait %lu", (unsigned long)player->dropped_frames,
+            (unsigned long)player->repeated_frames); putstr(buffer);
+    sprintf(buffer, "read %lu.%03lu max %lu.%03lu", (unsigned long)read_avg_whole,
+            (unsigned long)read_avg_frac, (unsigned long)read_max_whole,
+            (unsigned long)read_max_frac); putstr(buffer);
+    putstr("Press key for page 2");
+    diagnostic_wait_key();
+
+    /* Page 2: at most nine printed lines. */
+    os_ClrHome();
+    putstr("DIAGNOSTICS 2/2");
+    sprintf(buffer, "read %lu.%lu KiB/s", (unsigned long)(kib10 / 10u),
+            (unsigned long)(kib10 % 10u)); putstr(buffer);
+    sprintf(buffer, "cmd %lu maxQ %u", (unsigned long)player->read_submissions,
+            (unsigned)player->max_concurrent_reads); putstr(buffer);
+    sprintf(buffer, "map direct %lu gen %lu", (unsigned long)player->direct_map_hits,
+            (unsigned long)player->fragmented_frame_resolves); putstr(buffer);
+    sprintf(buffer, "pair %lu single %lu", (unsigned long)player->packed_pair_commands,
+            (unsigned long)player->packed_single_commands); putstr(buffer);
+    sprintf(buffer, "slots %u supplied %lu", (unsigned)player->slot_count,
+            (unsigned long)(player->packed_pair_commands * 2u
+                            + player->packed_single_commands)); putstr(buffer);
+    sprintf(buffer, ">111 %lu >250 %lu", (unsigned long)player->reads_over_111ms,
+            (unsigned long)player->reads_over_250ms); putstr(buffer);
+    sprintf(buffer, ">500 %lu >1000 %lu", (unsigned long)player->reads_over_500ms,
+            (unsigned long)player->reads_over_1000ms); putstr(buffer);
+    sprintf(buffer, "render %lu.%03lu ms (%lu)", (unsigned long)decode_avg_whole,
+            (unsigned long)decode_avg_frac, (unsigned long)player->decode_samples); putstr(buffer);
+    putstr("Press key to exit");
+    diagnostic_wait_key();
+
+#ifdef CINEMA_DIAGNOSTIC
+    {
+        char line[32];
+
+        /*
+         * Page 1 contains subtitle availability and startup status.
+         * Keep output short enough for the TI-OS text display.
+         */
+        os_ClrHome();
+        puts("SUBTITLE DIAG 1/2");
+
+        switch (g_subtitle_open_stage) {
+            case 1:
+                puts("open NO MAP");
+                break;
+
+            case 2:
+                puts("open TOO SHORT");
+                break;
+
+            case 3:
+                puts("open FAST FAIL");
+                break;
+
+            case 4:
+                puts("open FAST READY");
+                break;
+
+            default:
+                puts("open UNKNOWN");
+                break;
+        }
+
+        puts(
+            player->subtitle_available
+                ? "available YES"
+                : "available NO"
+        );
+
+        puts(
+            player->subtitles_enabled
+                ? "enabled YES"
+                : "enabled NO"
+        );
+
+        snprintf(
+            line,
+            sizeof(line),
+            "file %lu bytes",
+            (unsigned long)player->subtitle_size
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "cues %lu",
+            (unsigned long)
+                player->subtitle_header.cue_count
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "open %lu ms",
+            (unsigned long)(
+                player->subtitle_validation_ticks
+                * 1000u
+                / CLOCKS_PER_SEC
+            )
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "cue index %ld",
+            (long)player->subtitle_cue_index
+        );
+        puts(line);
+
+        puts("Key: next page");
+
+        /*
+         * Reuse the existing press-and-release diagnostic wait.
+         * This prevents one held key from skipping both pages.
+         */
+        diagnostic_wait_key();
+
+
+        /*
+         * Page 2 contains runtime I/O and contained failure data.
+         */
+        os_ClrHome();
+        puts("SUBTITLE DIAG 2/2");
+
+        snprintf(
+            line,
+            sizeof(line),
+            "runtime sec %lu",
+            (unsigned long)
+                player->subtitle_sector_reads
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "cue checks %lu",
+            (unsigned long)
+                player->subtitle_runtime_validations
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "failure %ld/%u",
+            (long)player->subtitle_failure_index,
+            (unsigned)player->subtitle_failure_reason
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "requests %lu",
+            (unsigned long)
+                g_subtitle_read_requests
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "cross reads %lu",
+            (unsigned long)
+                g_subtitle_cross_sector_requests
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "read bytes %lu",
+            (unsigned long)
+                g_subtitle_read_bytes
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "draw calls %lu",
+            (unsigned long)
+                g_subtitle_draw_calls
+        );
+        puts(line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "active %lu tog %lu",
+            (unsigned long)
+                g_subtitle_active_frames,
+            (unsigned long)
+                g_subtitle_toggle_count
+        );
+        puts(line);
+
+        puts("Key: exit");
+        diagnostic_wait_key();
+    }
+#endif
 }
 
 /* True once the last frame of the movie has been presented. */
@@ -978,6 +1701,10 @@ static bool player_v2_loop(player_v2_t *player)
                 player->loop_enabled = !player->loop_enabled;
                 break;
 
+            case sk_Del:
+                if(player->subtitle_available)subtitle_options_menu(player);
+                break;
+
             case sk_Window: /* frame-step forward, only while paused */
                 if (player->paused && player->has_presented
                     && player->last_frame_presented + 1 < player->frame_count) {
@@ -988,13 +1715,18 @@ static bool player_v2_loop(player_v2_t *player)
                 }
                 break;
 
-            case sk_Yequ: /* frame-step backward, only while paused */
+            case sk_Yequ: /* paused: step back; playing: toggle subtitles */
                 if (player->paused && player->has_presented
                     && player->last_frame_presented > 0) {
                     player->pause_after_render = true;
                     if (!player_seek_to_frame(player, player->last_frame_presented - 1)) {
                         return false;
                     }
+                } else if (!player->paused && player->subtitle_available) {
+                    player->subtitles_enabled = !player->subtitles_enabled;
+#ifdef CINEMA_DIAGNOSTIC
+                g_subtitle_toggle_count++;
+#endif
                 }
                 break;
 
@@ -1055,7 +1787,10 @@ static bool player_v2_loop(player_v2_t *player)
             uint32_t wanted = desired_frame(player, clock());
             uint32_t next_frame = player->has_presented
                 ? player->last_frame_presented + 1 : player->start_frame;
-            frame_slot_t *slot = find_ready_frame(player, next_frame);
+            frame_slot_t *slot;
+            if (wanted > next_frame && wanted-next_frame > player->max_schedule_lag)
+                player->max_schedule_lag=wanted-next_frame;
+            slot = find_ready_frame(player, next_frame);
 
             if (slot != NULL && wanted >= next_frame) {
                 if (player->buffering_shown) {
@@ -1072,9 +1807,11 @@ static bool player_v2_loop(player_v2_t *player)
 
                 render_frame(player, slot);
                 player->has_presented = true;
-                player->last_frame_presented = slot->frame_number;
+                player->last_frame_presented = slot->frame_number + slot->present_index;
                 player->last_progress_tick = clock();
-                slot->state = SLOT_EMPTY;
+                slot->frames_consumed = (uint8_t)(slot->present_index + 1u);
+                if (slot->frames_consumed >= slot->frame_span)
+                    slot->state = SLOT_EMPTY;
 
                 if (player->pause_after_render) {
                     /* A paused frame-step (sk_Window/sk_Yequ): the seek
@@ -1125,6 +1862,17 @@ static bool player_v2_loop(player_v2_t *player)
     }
 }
 
+static const fat32ro_extent_map_t *g_next_subtitle_map;
+static uint32_t g_next_subtitle_size,g_next_subtitle_movie_id;
+static bool g_next_subtitles_enabled;
+static uint8_t *g_next_subtitle_sector;
+void player_v2_set_subtitle_stream(const fat32ro_extent_map_t *map,uint32_t size,
+                                   uint32_t movie_id,bool enabled,uint8_t *sector_cache)
+{
+    g_next_subtitle_map=map; g_next_subtitle_size=size; g_next_subtitle_movie_id=movie_id;
+    g_next_subtitles_enabled=enabled; g_next_subtitle_sector=sector_cache;
+}
+
 bool player_v2_run(global_t *global, const cin2_header_t *header,
                     uint32_t start_frame, const fat32ro_extent_map_t *movie_map,
                     const char *filename)
@@ -1133,12 +1881,21 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     bool graphics_active = false;
     bool ok;
 
+    g_player_v2_result=PLAYER_V2_INVALID;
     if (header->frame_count == 0) {
         putstr("movie has no frames");
         return false;
     }
 
     memset(&player, 0, sizeof(player));
+    player.slot_count = PRIMARY_SLOT_COUNT;
+    player.slots[0].sprite_data = player.primary_storage[0];
+    player.slots[1].sprite_data = player.primary_storage[1];
+    if ((header->flags & CIN2_FLAG_PACKED4) && g_packed_extra_storage != NULL
+        && g_packed_extra_storage_size >= 2u + CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT) {
+        player.slots[2].sprite_data = g_packed_extra_storage;
+        player.slot_count = MAX_SLOT_COUNT;
+    }
     player.global = global;
     player.movie_map = movie_map;
     {
@@ -1153,14 +1910,66 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.frame_count = header->frame_count;
     player.fps_num = header->fps_num;
     player.fps_den = header->fps_den;
+    player.format_flags = header->flags;
+    player.frame_sectors = (uint8_t)cin2_frame_sectors(header->flags);
+    player.subtitle_map=g_next_subtitle_map;player.subtitle_size=g_next_subtitle_size;
+    player.subtitle_sector=g_next_subtitle_sector;
+    player.subtitle_movie_id=g_next_subtitle_movie_id;player.subtitles_enabled=g_next_subtitles_enabled;
+    player.subtitle_cached_sector=0;player.subtitle_sector_valid=false;
+    player.subtitle_failure_index=-1;player.subtitle_failure_reason=SUB_FAIL_NONE;
+    subtitle_invalidate_cue(&player);
+    /* Reuse the existing static thumbnail/packed-slot scratch only during
+     * validation. Playback has not initialized slot 2 yet, and validation
+     * mode is disabled before the storage can become a frame slot. */
+    if(g_packed_extra_storage!=NULL&&g_packed_extra_storage_size>=SUBTITLE_BULK_BYTES){
+        player.subtitle_bulk_buffer=g_packed_extra_storage;
+        player.subtitle_bulk_capacity=SUBTITLE_BULK_BYTES;
+    }
+    player.subtitle_validation_mode=false;
+    {
+        clock_t validation_start=clock();
+        if(player.subtitle_map!=NULL&&player.subtitle_sector!=NULL
+           &&player.subtitle_size>=CSU_HEADER_SIZE){
+            os_ClrHome();
+            putstr("Opening subtitles...");
+            player.subtitle_available=csu_stream_open_fast(&player.subtitle_header,
+                subtitle_stream_read,&player,player.subtitle_size,0u,
+                header->frame_count,header->fps_num,header->fps_den);
+        }else{
+            player.subtitle_available=false;
+        }
+        player.subtitle_validation_ticks=(clock_t)(clock()-validation_start);
+    }
+    player.subtitle_validation_mode=false;
+    player.subtitle_bulk_sector_count=0;
+    player.subtitle_bulk_buffer=NULL;
+    player.subtitle_bulk_capacity=0;
+    /* Validation traffic is reported separately. Runtime starts with an
+     * empty one-sector cache so no pointer into borrowed scratch survives. */
+    player.subtitle_sector_valid=false;
+    player.subtitle_sector_reads=0;
+    #ifdef CINEMA_DIAGNOSTIC
+    g_subtitle_read_requests = 0;
+    g_subtitle_cross_sector_requests = 0;
+    g_subtitle_read_bytes = 0;
+    g_subtitle_draw_calls = 0;
+    g_subtitle_active_frames = 0;
+    g_subtitle_toggle_count = 0;
+    if (player.subtitle_map == NULL) g_subtitle_open_stage = 1;
+    else if (player.subtitle_size < CSU_HEADER_SIZE) g_subtitle_open_stage = 2;
+    else if (!player.subtitle_available) g_subtitle_open_stage = 3;
+    else g_subtitle_open_stage = 4;
+#endif
+    g_next_subtitle_map=NULL;g_next_subtitle_size=0;g_next_subtitle_movie_id=0;g_next_subtitles_enabled=false; g_next_subtitle_sector=NULL;
     player.start_frame = start_frame;
     player.next_frame_to_queue = start_frame;
     choose_osd_colors(&player, header);
     {
         uint8_t i;
 
-        for (i = 0; i < SLOT_COUNT; ++i) {
+        for (i = 0; i < player.slot_count; ++i) {
             gfx_sprite_t *sprite = slot_sprite(&player.slots[i]);
+            player.slots[i].owner = &player;
 
             sprite->width = CINEMA_V2_WIDTH;
             sprite->height = CINEMA_V2_HEIGHT;
@@ -1172,6 +1981,7 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
      * (e.g. a read failure) shows as a plain text message instead of
      * being immediately replaced by a graphics-mode screen. */
     ok = prefill_frames(&player);
+    if(!ok) g_player_v2_result=PLAYER_V2_PREFILL_FAILED;
 
     if (ok) {
         /* A movie can easily run longer than TI-OS's idle auto-power-
@@ -1192,12 +2002,14 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
         gfx_ZeroScreen();
 
         player.start_tick = clock();
+        player.playback_start_tick = player.start_tick;
         player.fps_window_start = player.start_tick;
         player.last_progress_tick = player.start_tick;
         /* Surface the controls/scrubber briefly on start, the way a
          * video player does, then let it auto-hide. */
         osd_poke(&player);
         ok = player_v2_loop(&player);
+        g_player_v2_result=ok?PLAYER_V2_USER_EXIT:(global->usb?PLAYER_V2_READ_FAILED:PLAYER_V2_DISCONNECTED);
 
         os_EnableAPD();
     }
@@ -1206,10 +2018,12 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
         gfx_End();
     }
 
+#ifdef CINEMA_DIAGNOSTIC
     print_playback_summary(&player);
+#endif
 
-    if (ok) {
-        save_resume_state(&player);
+    if (player.has_presented) {
+        putstr(save_resume_state(&player) ? "resume saved and verified" : "resume save failed");
     }
 
     return ok;

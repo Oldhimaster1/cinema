@@ -277,6 +277,15 @@ int ti_Seek(int offset, unsigned int origin, uint8_t handle)
 static struct { int call_index; uint8_t key; } g_injected_keys[SIM_MAX_INJECTED_KEYS];
 static int g_injected_key_count = 0;
 static int g_getcsc_calls = 0;
+static int g_held_key_first_call = -1;
+static int g_held_key_last_call = -1;
+static uint8_t g_held_key = 0;
+void sim_set_held_key_range(int first_call, int last_call, uint8_t key)
+{
+    g_held_key_first_call = first_call;
+    g_held_key_last_call = last_call;
+    g_held_key = key;
+}
 
 void sim_inject_key_at_call(int call_index, uint8_t key)
 {
@@ -291,6 +300,9 @@ void sim_reset_injected_keys(void)
 {
     g_injected_key_count = 0;
     g_getcsc_calls = 0;
+    g_held_key_first_call = -1;
+    g_held_key_last_call = -1;
+    g_held_key = 0;
 }
 
 void os_SetCursorPos(uint8_t row, uint8_t col) { (void)row; (void)col; }
@@ -303,6 +315,10 @@ uint8_t os_GetCSC(void)
     int i;
 
     g_getcsc_calls++;
+    if (g_held_key != 0 && g_getcsc_calls >= g_held_key_first_call
+        && g_getcsc_calls <= g_held_key_last_call) {
+        return g_held_key;
+    }
     for (i = 0; i < g_injected_key_count; ++i) {
         if (g_injected_keys[i].call_index == g_getcsc_calls) {
             return g_injected_keys[i].key;

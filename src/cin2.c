@@ -46,6 +46,154 @@ uint32_t cin2_crc32(const uint8_t *data, uint32_t length)
     return crc ^ 0xFFFFFFFFu;
 }
 
+
+static bool add_u32_no_overflow(uint32_t a, uint32_t b, uint32_t *out)
+{
+    if (b > UINT32_MAX - a) return false;
+    *out = a + b;
+    return true;
+}
+
+bool cin2_parse_placement(const uint8_t *raw, cin2_placement_t *out)
+{
+    const uint8_t *p = raw + CIN2_PLACEMENT_OFFSET;
+    uint16_t extent_count;
+    uint16_t descriptor_bytes;
+    uint32_t stored_extent_crc;
+    uint32_t stored_metadata_crc;
+    uint16_t i;
+
+    if (memcmp(p, CIN2_PLACEMENT_MAGIC, 4) != 0
+        || p[4] != CIN2_PLACEMENT_VERSION
+        || (p[5] & ~CIN2_PLACEMENT_KNOWN_FLAGS) != 0
+        || (p[5] & CIN2_PLACEMENT_FLAG_PREPARED) == 0) return false;
+    extent_count = read_u16le(p + 6);
+    descriptor_bytes = read_u16le(p + 8);
+    if (extent_count == 0 || extent_count > CIN2_PLACEMENT_MAX_EXTENTS
+        || descriptor_bytes != (uint16_t)(64u + extent_count * 8u)
+        || CIN2_PLACEMENT_OFFSET + descriptor_bytes > CIN2_HEADER_BYTES
+        || read_u16le(p + 10) != 512u
+        || p[12] == 0) return false;
+
+    stored_extent_crc = read_u32le(p + 56);
+    stored_metadata_crc = read_u32le(p + 60);
+    if (stored_metadata_crc != cin2_crc32(p, 60)
+        || stored_extent_crc != cin2_crc32(raw + CIN2_PLACEMENT_EXTENTS_OFFSET,
+                                           (uint32_t)extent_count * 8u)) return false;
+
+    memset(out, 0, sizeof(*out));
+    out->flags = p[5];
+    out->extent_count = extent_count;
+    out->descriptor_bytes = descriptor_bytes;
+    out->logical_sector_bytes = read_u16le(p + 10);
+    out->sectors_per_cluster = p[12];
+    out->volume_serial = read_u32le(p + 16);
+    out->partition_base_lba = read_u32le(p + 20);
+    out->first_fat_lba = read_u32le(p + 24);
+    out->first_data_lba = read_u32le(p + 28);
+    out->fat_size_sectors = read_u32le(p + 32);
+    out->total_data_clusters = read_u32le(p + 36);
+    out->movie_first_cluster = read_u32le(p + 40);
+    out->movie_file_size = read_u32le(p + 44);
+    out->total_movie_sectors = read_u32le(p + 48);
+    out->immutable_header_crc = read_u32le(p + 52);
+    for (i = 0; i < extent_count; ++i) {
+        const uint8_t *e = raw + CIN2_PLACEMENT_EXTENTS_OFFSET + i * 8u;
+        out->extents[i].start_lba = read_u32le(e);
+        out->extents[i].sector_count = read_u32le(e + 4);
+    }
+    return true;
+}
+
+bool cin2_validate_placement(const cin2_placement_t *m,
+                              const cin2_placement_context_t *c)
+{
+    uint64_t data_end;
+    uint64_t sum = 0;
+    uint32_t expected_first_lba;
+    uint32_t cluster_offset;
+    uint16_t i, j;
+
+    if (m == NULL || c == NULL || m->extent_count == 0
+        || m->extent_count > CIN2_PLACEMENT_MAX_EXTENTS
+        || m->logical_sector_bytes != c->logical_sector_bytes
+        || m->sectors_per_cluster != c->sectors_per_cluster
+        || m->volume_serial != c->volume_serial
+        || m->partition_base_lba != c->partition_base_lba
+        || m->first_fat_lba != c->first_fat_lba
+        || m->first_data_lba != c->first_data_lba
+        || m->fat_size_sectors != c->fat_size_sectors
+        || m->total_data_clusters != c->total_data_clusters
+        || m->movie_first_cluster != c->movie_first_cluster
+        || m->movie_file_size != c->movie_file_size
+        || m->immutable_header_crc != c->immutable_header_crc
+        || c->logical_sector_bytes != 512u || c->sectors_per_cluster == 0
+        || c->movie_first_cluster < 2u) return false;
+
+    if (c->movie_file_size > UINT32_MAX - 511u) return false;
+    if (m->total_movie_sectors != (c->movie_file_size + 511u) / 512u) return false;
+    data_end = (uint64_t)c->first_data_lba
+        + (uint64_t)c->total_data_clusters * c->sectors_per_cluster;
+    cluster_offset = c->movie_first_cluster - 2u;
+    if (cluster_offset > UINT32_MAX / c->sectors_per_cluster
+        || !add_u32_no_overflow(c->first_data_lba,
+             cluster_offset * c->sectors_per_cluster, &expected_first_lba)
+        || m->extents[0].start_lba != expected_first_lba) return false;
+
+    for (i = 0; i < m->extent_count; ++i) {
+        uint64_t start = m->extents[i].start_lba;
+        uint64_t end = start + m->extents[i].sector_count;
+        if (m->extents[i].sector_count == 0 || start < c->first_data_lba
+            || end < start || end > data_end) return false;
+        sum += m->extents[i].sector_count;
+        if (sum > UINT32_MAX) return false;
+        for (j = 0; j < i; ++j) {
+            uint64_t other_start = m->extents[j].start_lba;
+            uint64_t other_end = other_start + m->extents[j].sector_count;
+            if (start < other_end && other_start < end) return false;
+        }
+    }
+    return sum == m->total_movie_sectors;
+}
+
+bool cin2_build_placement(uint8_t *raw, const cin2_placement_t *m)
+{
+    uint8_t *p = raw + CIN2_PLACEMENT_OFFSET;
+    uint16_t descriptor_bytes;
+    uint16_t i;
+    if (raw == NULL || m == NULL || m->extent_count == 0
+        || m->extent_count > CIN2_PLACEMENT_MAX_EXTENTS
+        || m->logical_sector_bytes != 512u || m->sectors_per_cluster == 0) return false;
+    descriptor_bytes = (uint16_t)(64u + m->extent_count * 8u);
+    memset(p, 0, CIN2_HEADER_BYTES - CIN2_PLACEMENT_OFFSET);
+    memcpy(p, CIN2_PLACEMENT_MAGIC, 4);
+    p[4] = CIN2_PLACEMENT_VERSION;
+    p[5] = m->flags | CIN2_PLACEMENT_FLAG_PREPARED;
+    write_u16le(p + 6, m->extent_count);
+    write_u16le(p + 8, descriptor_bytes);
+    write_u16le(p + 10, m->logical_sector_bytes);
+    p[12] = m->sectors_per_cluster;
+    write_u32le(p + 16, m->volume_serial);
+    write_u32le(p + 20, m->partition_base_lba);
+    write_u32le(p + 24, m->first_fat_lba);
+    write_u32le(p + 28, m->first_data_lba);
+    write_u32le(p + 32, m->fat_size_sectors);
+    write_u32le(p + 36, m->total_data_clusters);
+    write_u32le(p + 40, m->movie_first_cluster);
+    write_u32le(p + 44, m->movie_file_size);
+    write_u32le(p + 48, m->total_movie_sectors);
+    write_u32le(p + 52, m->immutable_header_crc);
+    for (i = 0; i < m->extent_count; ++i) {
+        uint8_t *e = raw + CIN2_PLACEMENT_EXTENTS_OFFSET + i * 8u;
+        write_u32le(e, m->extents[i].start_lba);
+        write_u32le(e + 4, m->extents[i].sector_count);
+    }
+    write_u32le(p + 56, cin2_crc32(raw + CIN2_PLACEMENT_EXTENTS_OFFSET,
+                                    (uint32_t)m->extent_count * 8u));
+    write_u32le(p + 60, cin2_crc32(p, 60));
+    return true;
+}
+
 bool cin2_frame_count_fits_drive(uint32_t frame_count, uint32_t drive_sectors)
 {
     uint64_t required_sectors = (uint64_t)CIN2_DATA_LBA
@@ -78,6 +226,8 @@ bool cin2_parse_header(const uint8_t *raw, cin2_header_t *out)
         return false;
     }
 
+    out->flags = raw[5];
+    if (out->flags & (uint8_t)~CIN2_FLAG_PACKED4) return false;
     out->width = read_u16le(raw + 6);
     out->height = read_u16le(raw + 8);
     out->fps_num = read_u32le(raw + 10);
@@ -102,7 +252,7 @@ void cin2_build_header(uint8_t *raw, const cin2_header_t *header)
     memset(raw, 0, CIN2_HEADER_BYTES);
     memcpy(raw, CIN2_MAGIC, 4);
     raw[4] = CIN2_VERSION;
-    raw[5] = 0; /* flags, reserved */
+    raw[5] = header->flags;
     write_u16le(raw + 6, header->width);
     write_u16le(raw + 8, header->height);
     write_u32le(raw + 10, header->fps_num);

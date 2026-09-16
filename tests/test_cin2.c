@@ -298,8 +298,62 @@ static void test_frame_count_fits_drive(void)
           "huge frame_count against a small drive is rejected, not wrapped");
 }
 
+static void test_placement_extension(void)
+{
+    uint8_t raw[CIN2_HEADER_BYTES];
+    cin2_header_t header = { 160, 96, 20, 1, 2, {0} };
+    cin2_placement_t p = {0}, parsed;
+    cin2_placement_context_t c = {0};
+    uint8_t before[58];
+
+    cin2_build_header(raw, &header);
+    memcpy(before, raw, sizeof(before));
+    p.flags = CIN2_PLACEMENT_FLAG_PREPARED;
+    p.extent_count = 1;
+    p.logical_sector_bytes = 512;
+    p.sectors_per_cluster = 4;
+    p.volume_serial = 0x12345678;
+    p.first_fat_lba = 32;
+    p.first_data_lba = 100;
+    p.fat_size_sectors = 64;
+    p.total_data_clusters = 10000;
+    p.movie_first_cluster = 4;
+    p.movie_file_size = 60u * 512u;
+    p.total_movie_sectors = 60;
+    p.immutable_header_crc = 0xAABBCCDD;
+    p.extents[0].start_lba = 108;
+    p.extents[0].sector_count = 60;
+    c.logical_sector_bytes = 512;
+    c.sectors_per_cluster = 4;
+    c.volume_serial = p.volume_serial;
+    c.first_fat_lba = p.first_fat_lba;
+    c.first_data_lba = p.first_data_lba;
+    c.fat_size_sectors = p.fat_size_sectors;
+    c.total_data_clusters = p.total_data_clusters;
+    c.movie_first_cluster = p.movie_first_cluster;
+    c.movie_file_size = p.movie_file_size;
+    c.immutable_header_crc = p.immutable_header_crc;
+
+    CHECK(cin2_build_placement(raw, &p), "placement builds");
+    CHECK(memcmp(before, raw, sizeof(before)) == 0, "placement preserves base header");
+    CHECK(cin2_parse_placement(raw, &parsed), "placement parses");
+    CHECK(cin2_validate_placement(&parsed, &c), "placement validates");
+
+    raw[CIN2_PLACEMENT_EXTENTS_OFFSET] ^= 1;
+    CHECK(!cin2_parse_placement(raw, &parsed), "extent CRC corruption rejected");
+    raw[CIN2_PLACEMENT_EXTENTS_OFFSET] ^= 1;
+    raw[CIN2_PLACEMENT_OFFSET + 20] ^= 1;
+    CHECK(!cin2_parse_placement(raw, &parsed), "metadata CRC corruption rejected");
+
+    cin2_build_header(raw, &header);
+    CHECK(!cin2_parse_placement(raw, &parsed), "absent placement rejected");
+    CHECK(!cin2_build_placement(raw, &(cin2_placement_t){0}),
+          "zero-extent placement rejected");
+}
+
 int main(void)
 {
+    test_placement_extension();
     test_header_round_trip();
     test_v1_drive_not_detected_as_v2();
     test_resume_round_trip();

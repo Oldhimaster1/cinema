@@ -131,13 +131,22 @@ def encode_frame(indices: Sequence[int]) -> bytes:
 
 
 def rgb888_to_rgb1555(r: int, g: int, b: int) -> int:
-    """Packs 8-bit RGB into the 1555 layout gfx_SetPalette actually
-    expects (5 bits each of R/G/B, top bit unused) -- the same bit
-    layout as the real graphx.h's gfx_RGBTo1555 macro. Not RGB565: CE's
-    GraphX has no 565 palette format at all, only 1555 (confirmed by
-    real-hardware testing showing wrong/inverted-looking colors when
-    this was originally packed as 565)."""
+    """Packs 8-bit RGB into the exact RGB1555 layout used by GraphX."""
     return ((r & 0xF8) << 7) | ((g & 0xF8) << 2) | (b >> 3)
+
+
+def rgb1555_to_rgb888(value: int) -> Tuple[int, int, int]:
+    """Returns the exact 8-bit RGB color displayed for an RGB1555 entry.
+
+    Five-bit channels are expanded by bit replication, matching the usual
+    0..31 to 0..255 mapping while preserving both endpoints exactly.
+    """
+    r5 = (value >> 10) & 31
+    g5 = (value >> 5) & 31
+    b5 = value & 31
+    return ((r5 << 3) | (r5 >> 2),
+            (g5 << 3) | (g5 >> 2),
+            (b5 << 3) | (b5 >> 2))
 
 
 # --- ffmpeg/ffprobe plumbing -------------------------------------------
@@ -185,26 +194,13 @@ def _read_exact(stream: IO[bytes], n: int) -> Optional[bytes]:
     return b"".join(chunks)
 
 
-#: Upper bound, in seconds, on how much of the source the palette-sampling
-#: pass will decode. This is what keeps pass 1 cheap for a long movie: the
-#: alternative of spreading samples across the *entire* runtime still
-#: requires decoding the entire runtime (the fps filter only decides which
-#: already-decoded frames to keep), so pass 1's cost would scale with movie
-#: length exactly like pass 2's does, defeating the point of a "cheap"
-#: sampling pass. A tried-and-reverted alternative -- seeking to `count`
-#: separate timestamps spread across the whole runtime with one small
-#: ffmpeg process per sample -- was *slower* than this in measurement: with
-#: samples spaced closer than the source's keyframe interval (common for
-#: typical long-GOP encodes), most seeks land mid-GOP and still decode
-#: forward from the nearest keyframe, paying that cost once per sample
-#: instead of once total, on top of per-process startup overhead. Capping
-#: the decoded *range* instead of changing *how* it's sampled is what
-#: actually bounds the cost, at the tradeoff of the palette reflecting
-#: only the first PALETTE_PROBE_SECONDS_CAP of the movie rather than the
-#: whole thing -- a quality tradeoff, not a correctness one, and one any
-#: single fixed-size palette for a whole movie already makes to some degree.
-PALETTE_PROBE_SECONDS_CAP = 60.0
-
+#: The global 16-color palette must represent the complete selected clip.
+#: Earlier code capped palette analysis to the first 60 seconds, so colors
+#: introduced later in a movie could collapse toward neutral entries and look
+#: like a gradual fade to grayscale. We now sample uniformly across the full
+#: selected duration. This requires a full low-output-rate decode pass, but it
+#: keeps chroma representative from beginning to end.
+PALETTE_PROBE_SECONDS_CAP = None
 
 def stream_raw_frames(video_path: Path, fps_num: int, fps_den: int,
                        start: Optional[float], duration: Optional[float],
@@ -221,10 +217,17 @@ def stream_raw_frames(video_path: Path, fps_num: int, fps_den: int,
     cmd += ["-i", str(video_path)]
     if duration is not None:
         cmd += ["-t", str(duration)]
-    cmd += ["-vf", f"fps={fps_num}/{fps_den},scale={WIDTH}:{HEIGHT}:flags=lanczos"]
+    cmd += ["-map", "0:v:0", "-an", "-sn", "-dn"]
+    cmd += [
+        "-vf",
+        f"fps={fps_num}/{fps_den}:round=near:eof_action=pass,"
+        f"scale={WIDTH}:{HEIGHT}:flags=lanczos",
+    ]
     if max_frames is not None:
         cmd += ["-frames:v", str(max_frames)]
-    cmd += ["-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+    # The fps filter alone owns frame selection. Passthrough prevents the
+    # output stage from duplicating/dropping a second time or relabeling timing.
+    cmd += ["-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout is not None and proc.stderr is not None
@@ -246,63 +249,123 @@ def stream_raw_frames(video_path: Path, fps_num: int, fps_den: int,
 # --- palette + quantization (unchanged interfaces -- unit-tested directly
 # with in-memory PIL Images, independent of how frames are sourced) -----
 
+def _palette_image_from_rgb1555(entries: Sequence[int]) -> Image.Image:
+    """Builds a Pillow palette made from exact calculator-display colors."""
+    if len(entries) != PALETTE_ENTRIES:
+        raise ValueError("palette must have exactly 16 entries")
+    raw: List[int] = []
+    for entry in entries:
+        raw.extend(rgb1555_to_rgb888(entry))
+    raw.extend([0] * (256 * 3 - len(raw)))
+    image = Image.new("P", (1, 1))
+    image.putpalette(raw)
+    return image
+
+
+def _candidate_rgb1555_colors(sheet: Image.Image) -> List[int]:
+    """Returns deterministic, frequency-ranked source colors at LCD precision."""
+    reduced = sheet.quantize(colors=256, method=Image.Quantize.MEDIANCUT,
+                             dither=Image.Dither.NONE)
+    counts = reduced.getcolors(maxcolors=256) or []
+    palette = reduced.getpalette() or []
+    ranked = sorted(counts, key=lambda item: (-item[0], item[1]))
+    result: List[int] = []
+    seen = set()
+    for _count, index in ranked:
+        offset = index * 3
+        if offset + 2 >= len(palette):
+            continue
+        value = rgb888_to_rgb1555(palette[offset], palette[offset + 1], palette[offset + 2])
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
 def build_global_palette(frames: Sequence[Image.Image], sample_count: int) -> Image.Image:
-    """Builds one 16-color adaptive palette representative of the whole
-    movie by tiling a sample of frames into a single sheet and
-    quantizing that. Returns a "P"-mode Image whose palette is the
-    result; pass it to Image.quantize(palette=...) to map any frame onto
-    this fixed palette (see docs/CIN2_FORMAT.md on why the palette must
-    be fixed for the whole movie rather than per-frame)."""
+    """Builds a deterministic RGB1555-aware global palette.
+
+    The old encoder chose indices against 24-bit colors, then rounded the
+    stored palette to RGB1555 afterward. This version first rounds candidate
+    colors to RGB1555, reconstructs the exact display RGB values, and makes
+    Pillow quantize against those exact values. Duplicate RGB1555 entries are
+    replaced with frequency-ranked source candidates whenever the sampled
+    source contains enough distinct colors.
+    """
     if not frames:
         raise ValueError("no frames to sample")
-
     step = max(1, len(frames) // max(1, sample_count))
     sampled = frames[::step][:sample_count]
-
-    tile_w, tile_h = WIDTH, HEIGHT
     cols = min(len(sampled), 8)
     rows = (len(sampled) + cols - 1) // cols
-    sheet = Image.new("RGB", (tile_w * cols, tile_h * rows))
+    sheet = Image.new("RGB", (WIDTH * cols, HEIGHT * rows))
     for i, img in enumerate(sampled):
-        x = (i % cols) * tile_w
-        y = (i // cols) * tile_h
-        sheet.paste(img.convert("RGB"), (x, y))
+        sheet.paste(img.convert("RGB"), ((i % cols) * WIDTH, (i // cols) * HEIGHT))
 
-    return sheet.quantize(colors=PALETTE_ENTRIES, method=Image.Quantize.MEDIANCUT)
+    base = sheet.quantize(colors=PALETTE_ENTRIES, method=Image.Quantize.MEDIANCUT,
+                          dither=Image.Dither.NONE)
+    base_raw = base.getpalette() or []
+    entries: List[int] = []
+    seen = set()
+    base_entry_count = min(PALETTE_ENTRIES, len(base_raw) // 3)
+    for i in range(base_entry_count):
+        offset = i * 3
+        value = rgb888_to_rgb1555(base_raw[offset], base_raw[offset + 1], base_raw[offset + 2])
+        if value not in seen:
+            entries.append(value)
+            seen.add(value)
+    for value in _candidate_rgb1555_colors(sheet):
+        if len(entries) >= PALETTE_ENTRIES:
+            break
+        if value not in seen:
+            entries.append(value)
+            seen.add(value)
+    while len(entries) < PALETTE_ENTRIES:
+        entries.append(entries[-1] if entries else 0)
+    return _palette_image_from_rgb1555(entries)
 
 
 def palette_image_to_rgb1555(palette_image: Image.Image) -> List[int]:
     raw = palette_image.getpalette()
     if raw is None:
         raise ValueError("palette_image has no palette")
-
-    entries = []
-    for i in range(PALETTE_ENTRIES):
-        offset = i * 3
-        if offset + 2 < len(raw):
-            r, g, b = raw[offset], raw[offset + 1], raw[offset + 2]
-        else:
-            r = g = b = 0
-        entries.append(rgb888_to_rgb1555(r, g, b))
-    return entries
+    return [rgb888_to_rgb1555(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2])
+            for i in range(PALETTE_ENTRIES)]
 
 
-def quantize_frame(image: Image.Image, palette_image: Image.Image) -> List[int]:
-    """Maps an RGB frame onto the fixed global palette, returning
-    WIDTH*HEIGHT indices (0..15), row-major top-to-bottom."""
+def quantize_frame(image: Image.Image, palette_image: Image.Image,
+                   dither_mode: str = "clean") -> List[int]:
+    """Maps a frame to the fixed palette.
+
+    legacy preserves full Floyd-Steinberg diffusion. clean disables error
+    diffusion, removing the isolated-pixel noise and temporal crawling it can
+    create on flat surfaces. Clean is the default for both the CLI and direct API calls;
+    legacy Floyd-Steinberg output remains available explicitly.
+    """
     rgb = image.convert("RGB")
     if rgb.size != (WIDTH, HEIGHT):
         rgb = rgb.resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
-    quantized = rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
-    indices = list(quantized.tobytes())
-    # Floyd-Steinberg dithering with a quantize()-supplied palette can
-    # occasionally emit an index past the palette's actual (possibly
-    # <16, if the source sheet had fewer than 16 distinct colors) entry
-    # count; clamp defensively since the calculator's decoder interprets
-    # any 4-bit value 0..15 as a valid palette slot with no bounds check
-    # of its own (the display hardware just shows whatever color is there).
-    return [min(i, PALETTE_ENTRIES - 1) for i in indices]
+    if dither_mode == "legacy":
+        dither = Image.Dither.FLOYDSTEINBERG
+    elif dither_mode == "clean":
+        dither = Image.Dither.NONE
+    else:
+        raise ValueError(f"unknown dither mode: {dither_mode}")
+    quantized = rgb.quantize(palette=palette_image, dither=dither)
+    return [min(i, PALETTE_ENTRIES - 1) for i in quantized.tobytes()]
 
+
+def automatic_palette_samples(duration_seconds: Optional[float]) -> int:
+    """Chooses a bounded sample count appropriate for the selected span."""
+    if duration_seconds is None or duration_seconds <= 0:
+        return 64
+    if duration_seconds <= 5 * 60:
+        return 32
+    if duration_seconds <= 30 * 60:
+        return 64
+    if duration_seconds <= 90 * 60:
+        return 128
+    return 256
 
 # --- parallel per-frame quantize+pack -----------------------------------
 # multiprocessing worker: each pool process reconstructs the (small,
@@ -311,18 +374,20 @@ def quantize_frame(image: Image.Image, palette_image: Image.Image) -> List[int]:
 # bytes (not PIL Image objects) to sidestep any Pillow-pickling ambiguity.
 
 _worker_palette_image: Optional[Image.Image] = None
+_worker_dither_mode = "clean"
 
 
-def _pool_init(palette_png_bytes: bytes) -> None:
-    global _worker_palette_image
+def _pool_init(palette_png_bytes: bytes, dither_mode: str) -> None:
+    global _worker_palette_image, _worker_dither_mode
     _worker_palette_image = Image.open(io.BytesIO(palette_png_bytes))
     _worker_palette_image.load()
+    _worker_dither_mode = dither_mode
 
 
 def _pool_quantize_and_pack(raw_rgb: bytes) -> bytes:
     assert _worker_palette_image is not None
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return encode_frame(quantize_frame(image, _worker_palette_image))
+    return encode_frame(quantize_frame(image, _worker_palette_image, _worker_dither_mode))
 
 
 def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
@@ -335,7 +400,7 @@ def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
 
 def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
            palette_samples: int, start: Optional[float], duration: Optional[float],
-           jobs: Optional[int] = None) -> int:
+           jobs: Optional[int] = None, dither_mode: str = "clean") -> int:
     """Returns the number of frames written. Writes to
     output_path.with_name(output_path.name + ".partial") first and only
     renames it to output_path after a self-check confirms the header and
@@ -345,7 +410,7 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
     partial file is removed and output_path is left untouched (not
     created, and not overwritten if it already existed)."""
     partial_path = output_path.with_name(output_path.name + ".partial")
-    jobs = jobs if jobs and jobs > 0 else (os.cpu_count() or 1)
+    jobs = jobs if jobs and jobs > 0 else min(4, os.cpu_count() or 1)  # measured exact-output winner on 4C/8T control machine
 
     try:
         # --- pass 1: cheap, bounded sample for the global palette ---
@@ -355,9 +420,12 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         # pass's cost independent of movie length.
         probed = probe_duration_seconds(video_path)
         requested_span = duration if duration is not None else probed
-        probe_span = (min(requested_span, PALETTE_PROBE_SECONDS_CAP)
-                      if requested_span and requested_span > 0
-                      else PALETTE_PROBE_SECONDS_CAP)
+        if palette_samples <= 0:
+            palette_samples = automatic_palette_samples(requested_span)
+        # Valid media normally has a probeable duration. If ffprobe cannot
+        # determine it, retain a bounded fallback so ffmpeg remains responsible
+        # for reporting unreadable/corrupt input through its normal error path.
+        probe_span = requested_span if requested_span and requested_span > 0 else 60.0
 
         # fps = palette_samples / probe_span, as an exact fraction scaled
         # by 1000x for sub-second precision -- e.g. probe_span=0.05s, 2
@@ -392,11 +460,11 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
 
             if jobs == 1:
                 for raw in raw_frames:
-                    out.write(_pool_quantize_and_pack_single(raw, palette_image))
+                    out.write(_pool_quantize_and_pack_single(raw, palette_image, dither_mode))
                     frame_count += 1
             else:
                 with multiprocessing.Pool(
-                    processes=jobs, initializer=_pool_init, initargs=(palette_png_bytes,)
+                    processes=jobs, initializer=_pool_init, initargs=(palette_png_bytes, dither_mode)
                 ) as pool:
                     for packed in pool.imap(_pool_quantize_and_pack, raw_frames, chunksize=8):
                         out.write(packed)
@@ -412,6 +480,17 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
             )))
 
         _self_check(partial_path, frame_count)
+        encoded_duration = frame_count * fps_den / fps_num
+        frame_period = fps_den / fps_num
+        # Preserve real-time motion: lowering FPS must select fewer frames, not
+        # retain source-frame count and play those frames at a lower header rate.
+        # FFmpeg boundary rounding is allowed by at most two output frames.
+        if (requested_span is not None and requested_span > 0
+                and abs(encoded_duration - requested_span) > 2.0 * frame_period + 1e-6):
+            raise RuntimeError(
+                f"timing self-check failed: source span {requested_span:.6f}s, "
+                f"encoded span {encoded_duration:.6f}s at {fps_num}/{fps_den} fps"
+            )
         partial_path.replace(output_path)
     except BaseException:
         partial_path.unlink(missing_ok=True)
@@ -427,10 +506,11 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
     return frame_count
 
 
-def _pool_quantize_and_pack_single(raw_rgb: bytes, palette_image: Image.Image) -> bytes:
+def _pool_quantize_and_pack_single(raw_rgb: bytes, palette_image: Image.Image,
+                                   dither_mode: str = "clean") -> bytes:
     """--jobs 1 path: same work as _pool_quantize_and_pack, no pool."""
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return encode_frame(quantize_frame(image, palette_image))
+    return encode_frame(quantize_frame(image, palette_image, dither_mode))
 
 
 def _self_check(path: Path, expected_frame_count: int) -> None:
@@ -489,14 +569,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               "CE Toolchain's documented ~262-273 KiB/s tested USB "
                               "throughput with headroom; 24fps needs ~360 KiB/s, "
                               "above that budget on a typical drive)")
-    parser.add_argument("--palette-samples", type=int, default=32,
-                         help="number of frames sampled to build the global "
-                              "16-color palette (default: 32)")
+    parser.add_argument("--palette-samples", type=int, default=0,
+                         help="frames sampled for the global palette; 0 selects "
+                              "32/64/128/256 automatically by duration (default: 0)")
+    parser.add_argument("--dither", choices=("clean", "legacy"), default="clean",
+                         help="clean removes error-diffusion speckles; legacy keeps "
+                              "the previous Floyd-Steinberg output (default: clean)")
     parser.add_argument("--start", type=float, default=None, help="start offset in seconds")
     parser.add_argument("--duration", type=float, default=None, help="duration in seconds")
     parser.add_argument("--jobs", type=int, default=None,
                          help="parallel worker processes for quantization "
                               "(default: all CPU cores; 1 disables the pool)")
+    parser.add_argument("--subtitles", type=Path, default=None,
+                         help="optional SRT file; writes a matching .csu and JSON report")
+    parser.add_argument("--subtitle-output", type=Path, default=None,
+                         help="optional CSU output path (default: movie output with .csu suffix)")
     args = parser.parse_args(argv)
 
     fps_num, fps_den = args.fps
@@ -505,16 +592,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.video.is_dir():
         return batch_encode(args.video, args.output, args.batch_ext, fps_num, fps_den,
-                             args.palette_samples, args.start, args.duration, args.jobs)
+                             args.palette_samples, args.start, args.duration, args.jobs,
+                             args.dither)
 
-    encode(args.video, args.output, fps_num, fps_den, args.palette_samples,
-           args.start, args.duration, args.jobs)
+    frame_count = encode(args.video, args.output, fps_num, fps_den, args.palette_samples,
+                         args.start, args.duration, args.jobs, args.dither)
+    if args.subtitles is not None:
+        from srt_to_csu import convert as convert_subtitles
+        subtitle_output = args.subtitle_output or args.output.with_suffix(".csu")
+        convert_subtitles(args.subtitles, subtitle_output, args.output.name,
+                          frame_count, fps_num, fps_den, args.output.stat().st_size)
     return 0
 
 
 def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int, fps_den: int,
                   palette_samples: int, start: Optional[float], duration: Optional[float],
-                  jobs: Optional[int]) -> int:
+                  jobs: Optional[int], dither_mode: str = "clean") -> int:
     """Encodes every video file directly inside video_dir (not
     recursive) whose extension matches ext_list into output_dir, one
     .bin per input with the same basename. A single failing file (a
@@ -545,7 +638,7 @@ def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int,
         print(f"--- {video_path.name} -> {out_path.name} ---")
         try:
             encode(video_path, out_path, fps_num, fps_den, palette_samples,
-                   start, duration, jobs)
+                   start, duration, jobs, dither_mode)
             succeeded.append(video_path.name)
         except Exception as exc:  # noqa: BLE001 -- one bad file must not sink the batch
             print(f"FAILED: {video_path.name}: {exc}", file=sys.stderr)
