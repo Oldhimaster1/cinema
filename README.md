@@ -1,274 +1,442 @@
-# Cinema
+# Cinema v0.9.0 Beta 1
 
-USB Video Player for the TI-84 Plus CE  
+Cinema is a USB video player for the TI-84 Plus CE. It plays videos converted to the CIN2 format from compatible FAT32 USB storage.
 
-![Demo 1](media/dreamworks.gif) ![Demo 2](media/test_drive.gif)
+Beta 1 supports:
 
-## Overview
+- RAW8 and Packed4 CIN2 movies
+- FAT32 folders and paged browsing
+- Pause and resume
+- Forward and backward seeking
+- Frame stepping while paused
+- Whole-movie looping
+- Saved resume positions
+- Matching CSU subtitles
+- Subtitle delay, style, spacing, and position
+- Fast subtitle startup
+- Playback and subtitle diagnostics
 
-Cinema is a video player application that allows you to watch videos on your TI-84 Plus CE calculator using a USB thumb drive.
+> Cinema is beta software. The current build has been tested with a specific TI-84 Plus CE, USB drive, filesystem layout, movie, and subtitle setup. Compatibility and performance may vary with other hardware and files.
 
-Cinema now supports two on-disk formats, auto-detected from the drive:
+## Requirements
 
-- **v2 (CIN2, recommended):** 16-color indexed color with one shared
-  palette for the whole movie, any rational frame rate (e.g. 24/1 or
-  24000/1001, 15fps by default). See [`docs/CIN2_FORMAT.md`](docs/CIN2_FORMAT.md)
-  for why this exists and the exact on-disk layout.
-- **v1 (legacy):** the original 256-color-per-frame format, still fully
-  supported for existing drives.
+### Calculator and USB hardware
 
-## Installation Instructions (v2)
+- TI-84 Plus CE
+- Compatible USB connection setup
+- FAT32 USB storage
+- 512-byte logical sectors
+- Sufficient storage for converted movies
+- Required CE runtime libraries
 
-Cinema reads movie files directly off a normally-formatted FAT32 USB
-drive, so **multiple movies can live on one drive** as separate files --
-no need to dedicate a whole drive to a single video.
+The exact cable, adapter, hub, or power arrangement may depend on the USB drive being used.
 
-1. **Format your USB drive as FAT32** (a drive fresh out of the packaging,
-   or reformatted in Windows/macOS/Linux as usual, works fine -- no
-   special tooling needed).
-2. **Encode your video(s):**
-   ```
-   pip install pillow
-   python3 tools/encode_cin2.py input.mp4 output.bin
-   ```
-   To convert a whole folder of videos at once, pass a directory for
-   both arguments instead of a single file: `python3 tools/encode_cin2.py
-   videos/ encoded/` encodes every video it finds directly inside
-   `videos/` into a matching `.bin` in `encoded/` (created if needed),
-   one movie's failure doesn't stop the rest, and a summary prints at
-   the end (`--batch-ext` controls which extensions count as videos).
+Cinema does not support exFAT, NTFS, or FAT16.
 
-   Requires `ffmpeg` on your PATH. `tools/encode_cin2.py` is a single
-   self-contained script -- no sibling files needed, copy just that one
-   file anywhere. It decodes the source once via a raw pipe (no PNG
-   round-trip) and quantizes frames in parallel across all CPU cores by
-   default (`--jobs N` to control that, `--jobs 1` for single-threaded).
-   Defaults to 15fps, chosen to fit the CE Toolchain's documented
-   ~262-273 KiB/s tested USB throughput with headroom at this format's
-   15,360 bytes/frame (see "Performance" below) -- raise it with `--fps`
-   (e.g. `--fps 24` or `--fps 24000/1001` for film-rate content) if your
-   drive is faster than that -- playback never drops frames to keep up,
-   so if it isn't fast enough the movie just runs slower than real time
-   (with a "Buffering..." overlay) instead of skipping content.
-   `--start`/`--duration` trims, and `--palette-samples` controls how
-   many frames are sampled when building the movie's global 16-color
-   palette (see `--help`).
-3. **Copy the output file(s) onto the drive**, in the root folder, with
-   a `.bin` or `.cin` extension (either works -- the extension is only
-   used to tell movie files apart from anything else on the drive, e.g.
-   `movie1.bin`, `movie2.cin`). Copy as many as you like.
-4. **Install on calculator** -- transfer `CINEMA.8xp` to your TI-84 Plus CE.
+Back up important files before formatting or modifying a USB drive.
 
-### Raw whole-device image (legacy / fallback)
+### Computer software
 
-If a drive has no FAT32 filesystem at all (e.g. wiped with `dd` and never
-formatted), Cinema falls back to the original raw-image mode: write a
-single `.bin` straight to the start of the device (`sudo dd if=output.bin
-of=/dev/sdX bs=1M conv=fsync` on Linux/macOS, or [HDD Raw Copy
-Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/) on Windows) and
-Cinema plays that one movie directly. This only supports a single movie
-per drive -- prefer the FAT32 workflow above for anything else.
+Movie conversion requires:
 
-### v1 (legacy) drives
+- Python 3
+- Pillow
+- FFmpeg available on `PATH`
 
-Existing v1 drives produced by [FBin](https://github.com/will-dabeast09/fbin)
-still work unmodified -- just write the binary as before. Cinema detects
-the format automatically from the drive.
+Install Pillow:
 
-## Usage
+```powershell
+py -m pip install pillow
+```
 
-1. Run CINEMA on your calculator and insert your prepared USB drive.
-2. On a FAT32 drive, pick a movie from the on-screen list (Up/Down to
-   move, Enter to select, Clear to exit) -- shown even if there's only
-   one file, so you always see what's on the drive.
-3. If you've watched this movie before, choose to resume or restart.
-4. Playback begins automatically.
+Confirm that FFmpeg is available:
 
-**File browser controls (FAT32 drives only):**
+```powershell
+ffmpeg -version
+```
 
-| Key           | Action                                    |
-|---------------|--------------------------------------------|
-| Up / Down     | Move the selection                         |
-| Enter / 2nd   | Play the selected movie / open a folder    |
-| Clear         | Go up a folder, or exit at the root        |
+## Install Cinema
 
-**v2 controls:**
+1. Transfer `Cinema_Beta_1_Diagnostic.8xp` to the calculator.
+2. Prepare a FAT32 USB drive.
+3. Convert a video to CIN2.
+4. Verify the converted movie.
+5. Copy the movie to the USB drive as an ordinary file.
+6. Optionally create and copy a matching CSU subtitle file.
+7. Run Cinema and connect the USB drive.
 
-| Key           | Action                                    |
-|---------------|--------------------------------------------|
-| 2nd / Enter   | Pause / resume                             |
-| Left / Right  | Seek 10s back / forward                    |
-| Up / Down     | Seek 60s forward / back                    |
-| Window / Y=   | Step one frame forward / back (while paused) |
-| 0             | Restart from the beginning                 |
-| Graph         | Toggle loop/repeat                         |
-| Mode          | Pin the on-screen overlay open/closed      |
-| Clear         | Exit -- returns to the file browser (saves resume state) |
+Cinema recognizes `.BIN` and `.CIN` movie files.
 
-Exiting a movie (Clear, or reaching the end) goes back to the file
-browser rather than quitting Cinema, so picking another movie off the
-same drive doesn't require relaunching. The browser shows each movie's
-length and a live thumbnail next to its name, supports subfolders (a
-folder shows as `name/`; Clear goes back up one level), and remembers
-resume state per movie (up to 8), not just for whichever one you
-watched most recently. If playback stalls waiting on USB reads for more
-than half a second, a "Buffering..." message appears rather than just
-freezing silently. The OSD's "B" figure is the calculator's raw battery
-status reading -- its exact scale isn't documented anywhere the code
-could confirm, so treat it as relative (higher = more charge) until
-someone reports what it reads at a known charge level. Auto-power-down
-is disabled while a movie is actually playing, so a long movie can't get
-cut off by the calculator going to sleep on its own.
+Short, simple filenames are recommended.
 
-A progress bar, elapsed/total time, live FPS, and per-frame decode cost
-appear briefly on any keypress (in the black letterbox bar under the
-video, so it never covers the picture), and stay up if pinned with
-Mode. The decode-cost figure printed on exit and shown live in the
-overlay is the number to watch when judging playback speed -- see
-"Performance" below.
+## Convert a Movie
 
-**v1 controls:** any key exits (no pause/seek -- the legacy player is
-kept only for backward compatibility with existing v1 drives).
+View all current encoder options:
 
-## Technical Specifications
+```powershell
+py encode_cin2.py --help
+```
 
-|                  | v2 (CIN2)                         | v1 (legacy)          |
-|------------------|------------------------------------|-----------------------|
-| Resolution       | 160 x 96                          | 160 x 96               |
-| Color depth      | 16 colors (one shared palette)    | 256 colors per frame  |
-| Frame rate       | 15fps default, any rational rate via `--fps` | ~10-11fps (uncapped)  |
-| Bytes/frame      | 15,360 (30 sectors)                | 15,872 (31 sectors)   |
-| Required throughput @ target fps | ~225 KiB/s @ 15fps (default), ~360 KiB/s @ 24fps | ~155-170 KiB/s @ 10-11fps |
+Replace the example paths below with paths to real files on the computer.
 
-## Performance
+Basic conversion:
 
-v2's frame format and player went through a real redesign after
-real-hardware testing showed it falling well short of v1 (legacy)'s
-10-11fps despite moving less data per frame. The investigation that
-found why is worth recording, since both root causes were structural,
-not tuning:
+```powershell
+py encode_cin2.py `
+    "C:\Users\YourName\Videos\Input.mp4" `
+    "C:\Users\YourName\Videos\MOVIE.BIN"
+```
 
-1. **No decode step at all, matching the original Cinema project this
-   one is a rewrite of.** An earlier version of CIN2 packed 2 pixels per
-   byte (4 bits each) to send half as much data per frame as the
-   original format. That required a per-frame unpack step (expanding
-   packed nibbles back to one byte per pixel, since GraphX's
-   `gfx_ScaledSprite_NoClip()` has no packed-4-bit sprite format) whose
-   CPU cost on the ez80 core -- which has no barrel shifter, so even a
-   lookup-table-based unpack isn't free -- outweighed the I/O it saved.
-   Comparing against
-   [wwierzbowski/cinema](https://github.com/wwierzbowski/cinema) (the
-   original project) made this obvious: its player reads frame pixels
-   directly off USB into the exact sprite buffer it draws from, no
-   decode step of any kind, and reaches 10-11fps despite needing *more*
-   I/O per frame than CIN2's packed format ever did. `src/player_v2.c`
-   now does the same thing: each read-ahead slot's buffer *is* a
-   `gfx_sprite_t`, so a frame's bytes land straight from
-   `msd_ReadAsync` into what `gfx_ScaledSprite_NoClip()` draws, with no
-   copy or unpack in between. CIN2 keeps its one real, uncontroversial
-   win over the original format (a palette shared by the whole movie,
-   installed once, instead of resent every frame) and drops the bit
-   packing that didn't pay for itself. See `docs/CIN2_FORMAT.md` for the
-   full before/after.
+Encode at 18 FPS:
 
-2. **A redundant wait that starved USB reads of CPU time.**
-   `gfx_SwapDraw()`'s own documentation (`graphx.h`) says it does not
-   block -- instead "the next invocation of a graphx drawing function
-   will block... waiting for this event", and explicitly recommends
-   scheduling non-drawing logic in the gap where a drawing call would
-   otherwise block, rather than waiting explicitly. `player_v2.c` used
-   to call `gfx_Wait()` right after every `gfx_SwapDraw()`, which
-   burned exactly that window doing nothing instead of servicing
-   `usb_HandleEvents()` for the next frame's already-queued read. It's
-   gone now; the next frame's first draw call still waits correctly if
-   the LCD genuinely hasn't caught up, but no longer waits when there
-   was USB work it could have overlapped with instead.
+```powershell
+py encode_cin2.py `
+    "C:\Users\YourName\Videos\Input.mp4" `
+    "C:\Users\YourName\Videos\MOVIE.BIN" `
+    --fps 18
+```
 
-3. **A scheduler that chased an ever-advancing clock instead of playing
-   sequentially.** `player_v2.c` used to decide which frame to show by
-   asking "what frame should be on screen right now, based on the wall
-   clock?" and discarding anything it had loaded that was older than
-   that. On real hardware, once sustained USB throughput fell even
-   slightly short of what the encoded frame rate needed, every frame it
-   finished reading was already stale by the time it arrived -- so it
-   got thrown away, and the gap between "what's loaded" and "what the
-   clock wants" only ever grew, with no way back short of a manual
-   seek. The result was near-total frame loss: playback trickling out
-   roughly one lucky frame every few seconds while the vast majority of
-   successfully-read frames were silently discarded, confirmed via a
-   host-side simulation that reproduces sustained slow reads (the
-   original scheduler doesn't just play badly under that condition, it
-   hangs indefinitely and never finishes the movie). The player now
-   always asks for the very next frame in sequence and never skips
-   ahead, using the wall clock only to pace playback to the encoded
-   rate when the hardware *can* keep up. If the hardware can't sustain
-   the encoded rate, the movie now plays every frame, just slower than
-   real time (with a "Buffering..." overlay), instead of glitching
-   through most of it.
+The encoder also supports:
 
-The build compiles at `-O3` (the CE Toolchain default is `-Oz`,
-optimize for *size*) -- free performance for a few extra KB of flash.
+- Rational frame rates
+- Batch-folder encoding
+- Start and duration limits
+- Automatic or manual palette sampling
+- Clean or legacy dithering
+- Worker-process selection
+- Optional SRT subtitle conversion
 
-Cinema deliberately does **not** boost the CPU to 48MHz at startup,
-even though that sounds like an obvious win: `usbdrvce.h` documents
-`USB_TRANSFER_BUS_ERROR` as most likely caused by running at a
-non-default CPU speed, and real hardware confirmed it -- decode got
-*slower*, not faster, at 48MHz, consistent with USB bus-error overhead
-eating the gain. Cinema reads from USB continuously during playback,
-so there's no window where boosting is safe.
+The encoder creates 160 x 96 video using a shared 16-color palette.
 
-Exit (or the live overlay, or Mode to pin it open) reports the
-player's own measured average per-frame blit time (labeled "decode" in
-the overlay for historical reasons -- there's no decode step left, just
-the GraphX scale-blit) and the FPS that implies as a ceiling *for that
-blit alone* -- e.g. "decode avg: 12.500 ms (decode ceiling: ~80 fps)"
-means the blit isn't what's capping playback if the observed FPS is
-much lower than that ceiling; something else (USB read throughput,
-`gfx_Wait()`/LCD timing) is. That split is what makes further
-optimization work targeted instead of guesswork.
+Do not literally enter example paths such as `C:\Path\To\Input.mp4`. Those are placeholders and do not refer to real files.
 
-## Known limitations
+## Create a Movie with Subtitles
 
-- v2 has been validated with host-side unit/simulation tests (see
-  `tests/`), structural compilation against the real CE-Programming
-  toolchain headers, and real physical TI-84 Plus CE hardware testing
-  (there is no ez80 CE toolchain or calculator in the development
-  environment itself, so hardware testing happens on the user's own
-  device). Playback speed on real hardware is an active area of work --
-  see "Performance" above for what's been tried and why. See
-  `docs/CIN2_FORMAT.md` for the full design rationale.
-- The v2 encoder targets 160x96 only, matching the calculator-side
-  decoder; both would need to change together to support another
-  resolution.
-- The FAT32 file browser only looks in the drive's root folder, and only
-  reads short (8.3) filenames -- long filenames still show up (FAT32
-  always stores a short name alongside a long one) but any name-mangling
-  applied by the OS that formatted the drive is what you'll see on the
-  calculator. Movies inside subfolders aren't listed. Up to 32 playable
-  files and up to 256 cluster-chain extents per movie (i.e. a very
-  fragmented file on a nearly-full drive) are supported; anything beyond
-  those limits is reported as an error rather than silently truncated.
-- FAT32 only -- FAT16, exFAT, and NTFS drives are detected as "a
-  filesystem Cinema can't read" and rejected with an on-screen message
-  rather than misread as movie data. Small/older USB drives (well under
-  ~1GB) are sometimes formatted FAT16 by default even when the box says
-  "FAT32" -- if you see that message, reformat the drive as FAT32
-  explicitly (on Windows: right-click the drive -> Format -> File
-  system: FAT32; if FAT32 isn't offered for a very small drive, use
-  `format X: /FS:FAT32` from an elevated Command Prompt, or a tool like
-  Rufus).
+The easiest subtitle workflow is to let the encoder create a matching CSU file:
 
-## Development / tests
+```powershell
+py encode_cin2.py `
+    "C:\Users\YourName\Videos\Input.mp4" `
+    "C:\Users\YourName\Videos\MOVIE.BIN" `
+    --fps 18 `
+    --subtitles "C:\Users\YourName\Videos\Input.srt"
+```
 
-`tests/run_tests.sh` runs everything that can be validated without real
-calculator hardware: `src/cin2.c` unit tests, structural
-compilation of all calculator-side sources against transcribed CE
-toolchain headers, full player state-machine simulations (prefill,
-async slot handling, scheduling, pause, resume, error paths) against a
-synthetic in-memory drive, and the Python encoder's tests (`pip install
-pillow pytest numpy` first).
+This creates files similar to:
 
-## Links
+```text
+MOVIE.BIN
+MOVIE.CSU
+```
 
-- [FBin GitHub Repository](https://github.com/will-dabeast09/fbin) (v1 encoder)
-- [HDD Raw Copy Tool](https://hddguru.com/software/HDD-Raw-Copy-Tool/)
+Copy both files into the same folder on the FAT32 USB drive.
+
+The movie and CSU must have the same base filename.
+
+## Standalone Subtitle Creation
+
+Cinema also includes a standalone SRT-to-CSU tool.
+
+View its exact required arguments:
+
+```powershell
+py srt_to_csu.py --help
+```
+
+The current standalone tool requires:
+
+- SRT input path
+- CSU output path
+- Movie name
+- Movie frame count
+- Movie FPS numerator
+- Movie FPS denominator
+- Final movie file size
+
+Because the CSU is associated with the final movie, finish encoding the movie before creating the standalone CSU.
+
+## Verify a Movie
+
+Verify an ordinary CIN2 file before copying it to the USB drive:
+
+```powershell
+py verify_cin2.py `
+    "C:\Users\YourName\Videos\MOVIE.BIN"
+```
+
+A successful structural verification does not guarantee that every USB drive can sustain the selected frame rate.
+
+Known Beta 1 verifier limitation: providing a nonexistent file path may produce a Python traceback instead of a clean missing-file message.
+
+## Verify Subtitles
+
+```powershell
+py verify_csu.py `
+    "C:\Users\YourName\Videos\MOVIE.CSU"
+```
+
+Always verify the CSU generated for the exact final movie.
+
+## Packed4 Movies
+
+Cinema Beta 1 supports Packed4 movies.
+
+Packed4 stores each 160 x 96 frame in 15 sectors and allows paired frame reads when the movie layout permits them. Packed4 is recommended for practical USB playback on the tested setup.
+
+Use the current Packed4 preparation tool included with the project, then verify the resulting movie before hardware testing.
+
+For normal Cinema use, copy the final movie to the FAT32 USB drive as an ordinary file.
+
+Do not overwrite an entire USB drive with a raw movie image unless following a separate, specifically documented raw-image test procedure.
+
+## Recommended USB Layout
+
+Movies may be stored in the root directory or in folders:
+
+```text
+USB drive
+├── MOVIE.BIN
+├── MOVIE.CSU
+├── ANOTHER.BIN
+└── Movies
+    ├── MOVIE2.BIN
+    └── MOVIE2.CSU
+```
+
+Keep each CSU beside its matching movie.
+
+## Movie Browser Controls
+
+- `Up` / `Down`: move the selection
+- `Enter` or `2nd`: play a movie or open a folder
+- `Clear`: return to the parent folder or leave Cinema from the root
+- `Mode`: open Cinema settings
+- On-screen previous and next controls: change browser pages
+
+The browser can display format information, duration, and thumbnails when available.
+
+## Playback Controls
+
+- `2nd` or `Enter`: pause or resume
+- `Left` / `Right`: seek backward or forward
+- `Down` / `Up`: make larger backward or forward seeks
+- `Window`: step one frame forward while paused
+- `Y=` while paused: step one frame backward
+- `Y=` while playing: toggle subtitles
+- `0`: restart from the beginning
+- `Graph`: toggle whole-movie looping
+- `Mode`: pin or unpin playback status
+- `Del`: open Subtitle Options
+- `Clear`: exit playback
+
+When resume storage is enabled, Cinema saves the last frame that was actually displayed.
+
+## Subtitle Options
+
+Press `Del` during playback.
+
+- `Up` / `Down`: select an option
+- `Left` / `Right`: change the selected option
+- `0`: reset subtitle options
+- `Clear` or `Del`: return to playback
+
+Subtitle Options include:
+
+- Subtitles enabled or disabled
+- Subtitle delay
+- Subtitle style
+- `Spacing: NORMAL`
+- `Spacing: TIGHT`
+- Top or bottom placement
+
+Beta 1 includes fast subtitle opening and clean restoration of playback after leaving Subtitle Options.
+
+## Supported Media
+
+- CIN2 movie format
+- RAW8 and Packed4 frame storage
+- 160 x 96 encoded video
+- 320 x 192 displayed video
+- Shared 16-color RGB1555 palette
+- Rational frame rates
+- `.BIN` and `.CIN` movie extensions
+- Matching `.CSU` subtitle sidecars
+- FAT32 folders and paged browsing
+- Legacy v1 playback for compatible older media
+
+Cinema does not play MP4, MKV, or other desktop video formats directly. Convert videos to CIN2 first.
+
+Cinema Beta 1 does not include audio playback.
+
+## Troubleshooting
+
+### The USB drive is not recognized
+
+Confirm that the drive uses FAT32 and 512-byte logical sectors.
+
+Try another compatible USB drive or connection arrangement if initialization fails.
+
+### No movies appear
+
+Confirm that:
+
+- The drive is FAT32.
+- The movie uses `.BIN` or `.CIN`.
+- The movie is in the current folder.
+- Another browser page does not contain the movie.
+- The filename is short and simple.
+
+### Subtitles do not appear
+
+Confirm that:
+
+- The CSU and movie use the same base filename.
+- Both files are in the same USB folder.
+- The CSU was generated for the exact final movie.
+- The CSU passes `verify_csu.py`.
+- Subtitles are enabled.
+- Subtitle delay is near zero.
+
+### Playback is slower than the encoded frame rate
+
+The USB drive may not sustain the required transfer rate.
+
+Try:
+
+- A lower encoder frame rate
+- A Packed4 movie
+- Another compatible USB drive
+- A less fragmented copy of the movie
+
+Cinema favors sequential presentation rather than silently discarding most frames.
+
+### A movie takes time to open
+
+Cinema may need to map the movie's FAT32 allocation.
+
+Opening time can depend on:
+
+- Movie size
+- File fragmentation
+- Cached placement information
+- USB-drive performance
+- Filesystem layout
+
+### The verifier says a file does not exist
+
+Replace the example path with the real location of the file.
+
+For example:
+
+```powershell
+py verify_cin2.py `
+    "C:\Users\YourName\Videos\ActualMovie.bin"
+```
+
+## Building from Source
+
+Run the complete host-side test suite:
+
+```bash
+bash tests/run_tests.sh
+```
+
+Build the fixed-ASM diagnostic configuration:
+
+```powershell
+make clean
+make CINEMA_RENDERER=fixed_asm CINEMA_BUILD=diagnostic
+```
+
+The resulting calculator program is:
+
+```text
+bin\CINEMA.8xp
+```
+
+The host structural test may require its GraphX stub to declare `gfx_BlitScreen()` when testing the current display-buffer repair.
+
+## Beta 1 Validation
+
+The Beta 1 source checkpoint passed:
+
+- CIN2 host tests
+- FAT32 host tests
+- Placement-map tests
+- Fixed-scale renderer tests
+- Streamed CSU tests larger than 64 KiB
+- Structural linking against CE stubs
+- Player v1 simulation
+- Player v2 end-to-end simulation
+- Fixed-C renderer integration testing
+- 63 Python encoder tests
+- Fixed-ASM CEdev compilation
+
+Physical TI-84 Plus CE testing confirmed:
+
+- Packed4 playback on the tested setup
+- Long-movie playback from FAT32 USB storage
+- Subtitle startup that is effectively immediate
+- Working subtitle presentation
+- Normal subtitle cue transitions
+- Clean return from Subtitle Options without stale or blinking menu text
+
+These results apply only to the exact tested calculator, player build, USB setup, movie, and subtitle files.
+
+## Release Artifact
+
+The physically tested Beta 1 diagnostic program is:
+
+```text
+Cinema_Beta_1_Diagnostic.8xp
+```
+
+Exact identity:
+
+```text
+Size: 48,564 bytes
+SHA-256:
+E76BFD029986B6ACECE5CEB0123870A0E073731F9AD70299B39AC425F11796C2
+```
+
+Repeated CEdev builds produced the same file size but different SHA-256 hashes. The attached release artifact is therefore identified by its exact checksum and should not be replaced with an untested rebuild.
+
+## Known Beta 1 Limitations
+
+- This is a diagnostic beta build.
+- Diagnostic pages appear after playback.
+- Cinema does not include audio playback.
+- USB compatibility and performance vary by drive and setup.
+- Video is encoded at 160 x 96.
+- Deeply fragmented movies may exceed the bounded extent-map capacity.
+- The CIN2 verifier's missing-file path may display a Python traceback.
+- The verifier may not accept every CPE1-prepared file.
+- Verify ordinary CIN2 files before placement preparation.
+- Some encoder help wording still refers to an older raw-drive workflow.
+- For normal Beta 1 use, copy movies to FAT32 as ordinary files.
+- CEdev packaging was not byte-reproducible in the tested environment.
+
+## Reporting a Problem
+
+Include:
+
+- Calculator model
+- Calculator OS version
+- Cinema Beta version
+- USB-drive model and capacity
+- USB filesystem and cluster size, if known
+- Movie filename
+- RAW8 or Packed4
+- Encoded frame rate
+- Whether subtitles were enabled
+- The last action performed before the problem
+- Any displayed error or diagnostic values
+- Whether the problem happens repeatedly
+
+Photos of the diagnostic screens can be useful.
+
+## Legal Use
+
+Use Cinema only with media that you have the right to convert, use, and distribute.
+
+No movies or subtitle files are included with Cinema.
