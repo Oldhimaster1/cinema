@@ -74,7 +74,7 @@ Short, simple filenames are recommended.
 View all current encoder options:
 
 ```powershell
-py encode_cin2.py --help
+py tools/encode_cin2.py --help
 ```
 
 Replace the example paths below with paths to real files on the computer.
@@ -82,7 +82,7 @@ Replace the example paths below with paths to real files on the computer.
 Basic conversion:
 
 ```powershell
-py encode_cin2.py `
+py tools/encode_cin2.py `
     "C:\Users\YourName\Videos\Input.mp4" `
     "C:\Users\YourName\Videos\MOVIE.BIN"
 ```
@@ -90,7 +90,7 @@ py encode_cin2.py `
 Encode at 18 FPS:
 
 ```powershell
-py encode_cin2.py `
+py tools/encode_cin2.py `
     "C:\Users\YourName\Videos\Input.mp4" `
     "C:\Users\YourName\Videos\MOVIE.BIN" `
     --fps 18
@@ -105,6 +105,7 @@ The encoder also supports:
 - Clean or legacy dithering
 - Worker-process selection
 - Optional SRT subtitle conversion
+- Packed4 encoding with `--packed4`
 
 The encoder creates 160 x 96 video using a shared 16-color palette.
 
@@ -115,7 +116,7 @@ Do not literally enter example paths such as `C:\Path\To\Input.mp4`. Those are p
 The easiest subtitle workflow is to let the encoder create a matching CSU file:
 
 ```powershell
-py encode_cin2.py `
+py tools/encode_cin2.py `
     "C:\Users\YourName\Videos\Input.mp4" `
     "C:\Users\YourName\Videos\MOVIE.BIN" `
     --fps 18 `
@@ -133,6 +134,10 @@ Copy both files into the same folder on the FAT32 USB drive.
 
 The movie and CSU must have the same base filename.
 
+If you use `--start` or `--duration` to convert just part of a video,
+the encoder also shifts and clips the original SRT cues so they stay
+aligned with the converted movie.
+
 ## Standalone Subtitle Creation
 
 Cinema also includes a standalone SRT-to-CSU tool.
@@ -140,7 +145,7 @@ Cinema also includes a standalone SRT-to-CSU tool.
 View its exact required arguments:
 
 ```powershell
-py srt_to_csu.py --help
+py tools/srt_to_csu.py --help
 ```
 
 The current standalone tool requires:
@@ -160,18 +165,18 @@ Because the CSU is associated with the final movie, finish encoding the movie be
 Verify an ordinary CIN2 file before copying it to the USB drive:
 
 ```powershell
-py verify_cin2.py `
+py tools/verify_cin2.py `
     "C:\Users\YourName\Videos\MOVIE.BIN"
 ```
 
 A successful structural verification does not guarantee that every USB drive can sustain the selected frame rate.
 
-Known Beta 1 verifier limitation: providing a nonexistent file path may produce a Python traceback instead of a clean missing-file message.
+The verifier checks movie integrity using bounded memory, including for large files.
 
 ## Verify Subtitles
 
 ```powershell
-py verify_csu.py `
+py tools/verify_csu.py `
     "C:\Users\YourName\Videos\MOVIE.CSU"
 ```
 
@@ -183,7 +188,24 @@ Cinema Beta 1 supports Packed4 movies.
 
 Packed4 stores each 160 x 96 frame in 15 sectors and allows paired frame reads when the movie layout permits them. Packed4 is recommended for practical USB playback on the tested setup.
 
-Use the current Packed4 preparation tool included with the project, then verify the resulting movie before hardware testing.
+The encoder now creates Packed4 files directly; there is no separate preparation step.
+From the repository root, run:
+
+```powershell
+py tools/encode_cin2.py `
+    "C:\Users\YourName\Videos\Input.mp4" `
+    "C:\Users\YourName\Videos\MOVIE.BIN" `
+    --fps 24 --packed4
+```
+
+**Important:** Packed4 playback requires a Cinema build using the
+`fixed_asm` renderer (including the physically tested Beta 1 diagnostic
+artifact). The default `graphx` and optional `fixed_c` builds play RAW8
+movies only; they now report a clear error if given Packed4.
+
+The unpacked and Packed4 encoder modes use identical palette choices and
+pixel indices. Packed4 halves the frame data size without degrading the
+pixels; actual FPS is limited by both USB throughput and rendering time.
 
 For normal Cinema use, copy the final movie to the FAT32 USB drive as an ordinary file.
 
@@ -329,7 +351,7 @@ Replace the example path with the real location of the file.
 For example:
 
 ```powershell
-py verify_cin2.py `
+py tools/verify_cin2.py `
     "C:\Users\YourName\Videos\ActualMovie.bin"
 ```
 
@@ -354,7 +376,11 @@ The resulting calculator program is:
 bin\CINEMA.8xp
 ```
 
-The host structural test may require its GraphX stub to declare `gfx_BlitScreen()` when testing the current display-buffer repair.
+Before installing a new build over the physically tested Beta, follow
+[the hardware FPS, stability, and subtitle checklist](docs/HARDWARE_TEST_PLAN.md).
+
+The host structural test includes a `gfx_BlitScreen()` stub, matching the
+documented CEdev GraphX interface.
 
 ## Beta 1 Validation
 
@@ -369,8 +395,12 @@ The Beta 1 source checkpoint passed:
 - Player v1 simulation
 - Player v2 end-to-end simulation
 - Fixed-C renderer integration testing
-- 63 Python encoder tests
+- 63 Python encoder tests (original Beta 1 checkpoint)
 - Fixed-ASM CEdev compilation
+
+The current reliability-repair branch extends coverage to 88 Python tests,
+including trimmed subtitle alignment, RAW8/Packed4 bit equivalence,
+encoder worker-count determinism, and multiple frame-rate combinations.
 
 Physical TI-84 Plus CE testing confirmed:
 
@@ -409,10 +439,9 @@ Repeated CEdev builds produced the same file size but different SHA-256 hashes. 
 - USB compatibility and performance vary by drive and setup.
 - Video is encoded at 160 x 96.
 - Deeply fragmented movies may exceed the bounded extent-map capacity.
-- The CIN2 verifier's missing-file path may display a Python traceback.
+- GraphX/fixed-C builds do not decode Packed4; use the tested fixed-ASM build.
 - The verifier may not accept every CPE1-prepared file.
 - Verify ordinary CIN2 files before placement preparation.
-- Some encoder help wording still refers to an older raw-drive workflow.
 - For normal Beta 1 use, copy movies to FAT32 as ordinary files.
 - CEdev packaging was not byte-reproducible in the tested environment.
 

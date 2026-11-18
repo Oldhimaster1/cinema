@@ -5,22 +5,18 @@ Single-file, no sibling modules required (just this script + ffmpeg on
 PATH + `pip install pillow`). See docs/CIN2_FORMAT.md in the Cinema repo
 for the on-disk format this produces: a 512-byte header (magic,
 resolution, frame rate, frame count, one shared 16-color palette)
-followed by 160x96 frames of one byte per pixel (0..15, unpacked), 30
-sectors each.
+followed by 160x96 frames in RAW8 (30 sectors each) or optional
+Packed4 (15 sectors each, two 4-bit pixels per byte).
 
 Usage:
 
-    python3 encode_cin2.py input.mp4 output.bin \\
+    python3 tools/encode_cin2.py input.mp4 output.bin \\
         [--fps 15] [--palette-samples 32] [--start 0] [--duration 60] \\
-        [--jobs N]
+        [--jobs N] [--packed4]
 
-Then write output.bin to a USB drive starting at LBA 0/byte 0, e.g.:
-
-    sudo dd if=output.bin of=/dev/sdX bs=1M conv=fsync
-
-(Linux/macOS) or with HDD Raw Copy Tool on Windows -- as a *raw image*,
-not a normal file copy; the calculator never sees a filesystem or a
-filename, so the extension you give `output.bin` doesn't matter.
+Copy output.bin to a compatible FAT32 USB drive as an ordinary file.
+Never overwrite an entire USB drive with a raw image for normal use.
+Packed4 movies require the fixed_asm renderer on the calculator.
 
 --- Performance notes ---
 
@@ -37,7 +33,7 @@ video, both fixed here:
 
 2. Per-frame palette quantization + dithering (Pillow, CPU-bound) used
    to run single-threaded, one frame at a time. It's now spread across
-   a multiprocessing pool (--jobs, default: all CPU cores), since each
+   a multiprocessing pool (--jobs, default: up to four CPU cores), since each
    frame quantizes independently once the movie's palette is fixed.
 
 Building the global palette still needs a representative sample spread
@@ -76,12 +72,14 @@ PALETTE_ENTRIES = 16
 
 WIDTH = 160
 HEIGHT = 96
-# One byte per pixel (0..15), not bit-packed -- see docs/CIN2_FORMAT.md's
-# "Why a new format" section for why v2 dropped 4-bit packing after
-# real-hardware testing showed the CPU cost of unpacking it back out on
-# the ez80 core cost more than the packing saved.
+# RAW8 uses one byte per pixel. Packed4 halves the storage for the
+# hardware-tested direct assembly renderer (not the old software-unpack
+# experiment, which was slower than RAW8).
 FRAME_BYTES = WIDTH * HEIGHT
 FRAME_SECTORS = 30
+FLAG_PACKED4 = 0x01
+PACKED4_FRAME_BYTES = FRAME_BYTES // 2
+PACKED4_FRAME_SECTORS = FRAME_SECTORS // 2
 SECTOR_BYTES = 512
 assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
 
@@ -100,6 +98,7 @@ class Cin2Header:
     fps_den: int
     frame_count: int
     palette: Sequence[int] = field(default_factory=lambda: [0] * PALETTE_ENTRIES)
+    flags: int = 0
 
 
 def build_header(header: Cin2Header) -> bytes:
@@ -109,7 +108,9 @@ def build_header(header: Cin2Header) -> bytes:
     buf = bytearray(HEADER_BYTES)
     buf[0:4] = MAGIC
     buf[4] = VERSION
-    buf[5] = 0  # flags, reserved
+    if header.flags & ~FLAG_PACKED4:
+        raise ValueError("unknown CIN2 format flags")
+    buf[5] = header.flags
     struct.pack_into(
         "<HHLLL", buf, 6,
         header.width, header.height, header.fps_num, header.fps_den,
@@ -121,12 +122,16 @@ def build_header(header: Cin2Header) -> bytes:
     return bytes(buf)
 
 
-def encode_frame(indices: Sequence[int]) -> bytes:
+def encode_frame(indices: Sequence[int], packed4: bool = False) -> bytes:
     """indices: WIDTH*HEIGHT palette indices (0..15), row-major. Returns
     FRAME_BYTES bytes, one per pixel, unpacked -- this is exactly what
     lands in the calculator's sprite buffer straight off the USB read."""
     if len(indices) != WIDTH * HEIGHT:
         raise ValueError(f"expected {WIDTH * HEIGHT} indices, got {len(indices)}")
+    if packed4:
+        return bytes((min(max(indices[i], 0), 15) << 4)
+                     | min(max(indices[i + 1], 0), 15)
+                     for i in range(0, len(indices), 2))
     return bytes(min(max(i, 0), 15) for i in indices)
 
 
@@ -375,19 +380,22 @@ def automatic_palette_samples(duration_seconds: Optional[float]) -> int:
 
 _worker_palette_image: Optional[Image.Image] = None
 _worker_dither_mode = "clean"
+_worker_packed4 = False
 
 
-def _pool_init(palette_png_bytes: bytes, dither_mode: str) -> None:
-    global _worker_palette_image, _worker_dither_mode
+def _pool_init(palette_png_bytes: bytes, dither_mode: str, packed4: bool = False) -> None:
+    global _worker_palette_image, _worker_dither_mode, _worker_packed4
     _worker_palette_image = Image.open(io.BytesIO(palette_png_bytes))
     _worker_palette_image.load()
     _worker_dither_mode = dither_mode
+    _worker_packed4 = packed4
 
 
 def _pool_quantize_and_pack(raw_rgb: bytes) -> bytes:
     assert _worker_palette_image is not None
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return encode_frame(quantize_frame(image, _worker_palette_image, _worker_dither_mode))
+    return encode_frame(quantize_frame(image, _worker_palette_image, _worker_dither_mode),
+                        packed4=_worker_packed4)
 
 
 def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
@@ -400,7 +408,8 @@ def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
 
 def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
            palette_samples: int, start: Optional[float], duration: Optional[float],
-           jobs: Optional[int] = None, dither_mode: str = "clean") -> int:
+           jobs: Optional[int] = None, dither_mode: str = "clean",
+           packed4: bool = False) -> int:
     """Returns the number of frames written. Writes to
     output_path.with_name(output_path.name + ".partial") first and only
     renames it to output_path after a self-check confirms the header and
@@ -419,7 +428,13 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         # across the whole runtime -- that's what actually keeps this
         # pass's cost independent of movie length.
         probed = probe_duration_seconds(video_path)
-        requested_span = duration if duration is not None else probed
+        # With --start, ffprobe still reports the original whole-video
+        # duration. Compare against the remaining selected span, otherwise
+        # valid offset encodes fail the timing check after writing.
+        remaining_span = max(0.0, probed - (start or 0.0)) if probed is not None else None
+        requested_span = duration if duration is not None else remaining_span
+        if remaining_span is not None and duration is not None:
+            requested_span = min(duration, remaining_span)
         if palette_samples <= 0:
             palette_samples = automatic_palette_samples(requested_span)
         # Valid media normally has a probeable duration. If ffprobe cannot
@@ -447,7 +462,7 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         # --- pass 2: full-rate stream, quantized+packed in parallel ---
         placeholder_header = build_header(Cin2Header(
             width=WIDTH, height=HEIGHT, fps_num=fps_num, fps_den=fps_den,
-            frame_count=0, palette=palette,
+            frame_count=0, palette=palette, flags=FLAG_PACKED4 if packed4 else 0,
         ))
         palette_png_bytes = _palette_image_to_png_bytes(palette_image)
 
@@ -460,11 +475,13 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
 
             if jobs == 1:
                 for raw in raw_frames:
-                    out.write(_pool_quantize_and_pack_single(raw, palette_image, dither_mode))
+                    out.write(_pool_quantize_and_pack_single(raw, palette_image,
+                                                             dither_mode, packed4))
                     frame_count += 1
             else:
                 with multiprocessing.Pool(
-                    processes=jobs, initializer=_pool_init, initargs=(palette_png_bytes, dither_mode)
+                    processes=jobs, initializer=_pool_init,
+                    initargs=(palette_png_bytes, dither_mode, packed4)
                 ) as pool:
                     for packed in pool.imap(_pool_quantize_and_pack, raw_frames, chunksize=8):
                         out.write(packed)
@@ -477,9 +494,10 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
             out.write(build_header(Cin2Header(
                 width=WIDTH, height=HEIGHT, fps_num=fps_num, fps_den=fps_den,
                 frame_count=frame_count, palette=palette,
+                flags=FLAG_PACKED4 if packed4 else 0,
             )))
 
-        _self_check(partial_path, frame_count)
+        _self_check(partial_path, frame_count, packed4=packed4)
         encoded_duration = frame_count * fps_den / fps_num
         frame_period = fps_den / fps_num
         # Preserve real-time motion: lowering FPS must select fewer frames, not
@@ -496,9 +514,10 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         partial_path.unlink(missing_ok=True)
         raise
 
-    total_bytes = HEADER_BYTES + frame_count * FRAME_BYTES
+    total_bytes = HEADER_BYTES + frame_count * (PACKED4_FRAME_BYTES if packed4 else FRAME_BYTES)
     duration_s = frame_count * fps_den / fps_num
-    throughput_kib_s = (FRAME_SECTORS * SECTOR_BYTES * fps_num / fps_den) / 1024
+    sectors_per_frame = PACKED4_FRAME_SECTORS if packed4 else FRAME_SECTORS
+    throughput_kib_s = (sectors_per_frame * SECTOR_BYTES * fps_num / fps_den) / 1024
     print(f"wrote {output_path}: {frame_count} frames, "
           f"{duration_s:.1f}s @ {fps_num}/{fps_den} fps, {total_bytes} bytes "
           f"({total_bytes / 1024:.1f} KiB), ~{throughput_kib_s:.1f} KiB/s required "
@@ -507,26 +526,29 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
 
 
 def _pool_quantize_and_pack_single(raw_rgb: bytes, palette_image: Image.Image,
-                                   dither_mode: str = "clean") -> bytes:
+                                   dither_mode: str = "clean", packed4: bool = False) -> bytes:
     """--jobs 1 path: same work as _pool_quantize_and_pack, no pool."""
     image = Image.frombytes("RGB", (WIDTH, HEIGHT), raw_rgb)
-    return encode_frame(quantize_frame(image, palette_image, dither_mode))
+    return encode_frame(quantize_frame(image, palette_image, dither_mode), packed4=packed4)
 
 
-def _self_check(path: Path, expected_frame_count: int) -> None:
+def _self_check(path: Path, expected_frame_count: int, packed4: bool = False) -> None:
     """Lightweight, self-contained sanity check -- re-reads what was just
     written and confirms the header parses, the CRC matches, and the
     file size matches the formula for expected_frame_count exactly. Not
     a full validator (see tools/verify_cin2.py in the Cinema repo for
     that); this only needs to catch "the file we just wrote is not the
     file we meant to write" before it gets renamed into place."""
-    raw = path.read_bytes()
-    if len(raw) < HEADER_BYTES:
+    with path.open("rb") as written:
+        header = written.read(HEADER_BYTES)
+        written.seek(0, os.SEEK_END)
+        written_size = written.tell()
+    if len(header) < HEADER_BYTES:
         raise RuntimeError("self-check failed: output shorter than the header")
-
-    header = raw[:HEADER_BYTES]
     if header[0:4] != MAGIC:
         raise RuntimeError("self-check failed: bad magic in written header")
+    if header[5] != (FLAG_PACKED4 if packed4 else 0):
+        raise RuntimeError("self-check failed: unexpected packing mode")
     stored_crc = struct.unpack_from("<L", header, 22)[0]
     if stored_crc != crc32(header[:CRC_BYTES]):
         raise RuntimeError("self-check failed: header CRC mismatch")
@@ -535,10 +557,10 @@ def _self_check(path: Path, expected_frame_count: int) -> None:
         raise RuntimeError(
             f"self-check failed: header frame_count {frame_count} != {expected_frame_count}")
 
-    expected_size = HEADER_BYTES + frame_count * FRAME_BYTES
-    if len(raw) != expected_size:
+    expected_size = HEADER_BYTES + frame_count * (PACKED4_FRAME_BYTES if packed4 else FRAME_BYTES)
+    if written_size != expected_size:
         raise RuntimeError(
-            f"self-check failed: file size {len(raw)} != expected {expected_size}")
+            f"self-check failed: file size {written_size} != expected {expected_size}")
 
 
 # --- CLI -------------------------------------------------------------
@@ -557,7 +579,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          help="input video file (anything ffmpeg can decode), or a "
                               "directory of them for batch mode (see --batch-ext)")
     parser.add_argument("output", type=Path,
-                         help="output file to raw-copy to a USB drive, or an output "
+                         help="output file to copy onto a FAT32 USB drive, or an output "
                               "directory in batch mode (one .bin per input, same "
                               "basename) -- created if it doesn't exist")
     parser.add_argument("--batch-ext", default=".mp4,.mkv,.mov,.avi,.webm,.m4v",
@@ -575,11 +597,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--dither", choices=("clean", "legacy"), default="clean",
                          help="clean removes error-diffusion speckles; legacy keeps "
                               "the previous Floyd-Steinberg output (default: clean)")
+    parser.add_argument("--packed4", action="store_true",
+                        help="store two 4-bit pixels per byte (half the RAW8 movie size); "
+                             "requires a Cinema build with the fixed_asm renderer")
     parser.add_argument("--start", type=float, default=None, help="start offset in seconds")
     parser.add_argument("--duration", type=float, default=None, help="duration in seconds")
     parser.add_argument("--jobs", type=int, default=None,
                          help="parallel worker processes for quantization "
-                              "(default: all CPU cores; 1 disables the pool)")
+                              "(default: up to four CPU cores; 1 disables the pool)")
     parser.add_argument("--subtitles", type=Path, default=None,
                          help="optional SRT file; writes a matching .csu and JSON report")
     parser.add_argument("--subtitle-output", type=Path, default=None,
@@ -589,25 +614,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     fps_num, fps_den = args.fps
     if fps_num <= 0 or fps_den <= 0:
         parser.error("--fps must be positive")
+    if args.start is not None and args.start < 0:
+        parser.error("--start must be non-negative")
+    if args.duration is not None and args.duration <= 0:
+        parser.error("--duration must be positive")
 
     if args.video.is_dir():
+        if args.subtitles is not None or args.subtitle_output is not None:
+            parser.error("--subtitles and --subtitle-output require a single input video")
         return batch_encode(args.video, args.output, args.batch_ext, fps_num, fps_den,
                              args.palette_samples, args.start, args.duration, args.jobs,
-                             args.dither)
+                             args.dither, args.packed4)
 
     frame_count = encode(args.video, args.output, fps_num, fps_den, args.palette_samples,
-                         args.start, args.duration, args.jobs, args.dither)
+                         args.start, args.duration, args.jobs, args.dither, args.packed4)
     if args.subtitles is not None:
         from srt_to_csu import convert as convert_subtitles
         subtitle_output = args.subtitle_output or args.output.with_suffix(".csu")
         convert_subtitles(args.subtitles, subtitle_output, args.output.name,
-                          frame_count, fps_num, fps_den, args.output.stat().st_size)
+                          frame_count, fps_num, fps_den, args.output.stat().st_size,
+                          start_offset_ms=round((args.start or 0.0) * 1000))
     return 0
 
 
 def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int, fps_den: int,
                   palette_samples: int, start: Optional[float], duration: Optional[float],
-                  jobs: Optional[int], dither_mode: str = "clean") -> int:
+                  jobs: Optional[int], dither_mode: str = "clean",
+                  packed4: bool = False) -> int:
     """Encodes every video file directly inside video_dir (not
     recursive) whose extension matches ext_list into output_dir, one
     .bin per input with the same basename. A single failing file (a
@@ -638,7 +671,7 @@ def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int,
         print(f"--- {video_path.name} -> {out_path.name} ---")
         try:
             encode(video_path, out_path, fps_num, fps_den, palette_samples,
-                   start, duration, jobs, dither_mode)
+                   start, duration, jobs, dither_mode, packed4)
             succeeded.append(video_path.name)
         except Exception as exc:  # noqa: BLE001 -- one bad file must not sink the batch
             print(f"FAILED: {video_path.name}: {exc}", file=sys.stderr)

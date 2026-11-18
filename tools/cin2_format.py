@@ -17,6 +17,8 @@ HEADER_BYTES = 512
 CRC_BYTES = 22  # bytes [0, 22) covered by header_crc32
 DATA_LBA = 1
 FRAME_SECTORS = 30
+PACKED4_FRAME_SECTORS = 15
+FLAG_PACKED4 = 0x01
 SECTOR_BYTES = 512
 PALETTE_ENTRIES = 16
 
@@ -35,9 +37,10 @@ WIDTH = 160
 HEIGHT = 96
 # One byte per pixel (0..15, indexing the shared palette), not bit-packed
 # -- see docs/CIN2_FORMAT.md's "Why a new format" section for why v2
-# dropped 4-bit packing after real-hardware testing showed the CPU cost
-# of unpacking it back out cost more than the packing saved.
+# The older software-unpacking experiment was slow, but the direct eZ80
+# assembly renderer in the released Beta supports Packed4 efficiently.
 FRAME_BYTES = WIDTH * HEIGHT
+PACKED4_FRAME_BYTES = FRAME_BYTES // 2
 assert FRAME_SECTORS * SECTOR_BYTES == FRAME_BYTES
 
 
@@ -192,15 +195,17 @@ def crc32(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
-def frame_lba(frame_number: int) -> int:
-    return DATA_LBA + frame_number * FRAME_SECTORS
+def frame_lba(frame_number: int, flags: int = 0) -> int:
+    sectors = PACKED4_FRAME_SECTORS if flags & FLAG_PACKED4 else FRAME_SECTORS
+    return DATA_LBA + frame_number * sectors
 
 
-def frame_count_fits_drive(frame_count: int, drive_sectors: int) -> bool:
-    """Mirrors src/cin2.c's cin2_frame_count_fits_drive: true if the
-    header sector plus every frame's FRAME_SECTORS sectors fits within
-    a drive of drive_sectors total logical blocks."""
-    required_sectors = DATA_LBA + frame_count * FRAME_SECTORS
+def frame_count_fits_drive(frame_count: int, drive_sectors: int, flags: int = 0) -> bool:
+    """Match the C player's 64-bit drive-bound check for RAW8/Packed4."""
+    if flags & ~FLAG_PACKED4 or frame_count < 0:
+        return False
+    frame_sectors = PACKED4_FRAME_SECTORS if flags & FLAG_PACKED4 else FRAME_SECTORS
+    required_sectors = DATA_LBA + frame_count * frame_sectors
     return required_sectors <= drive_sectors
 
 
@@ -212,9 +217,12 @@ class Cin2Header:
     fps_den: int
     frame_count: int
     palette: Sequence[int] = field(default_factory=lambda: [0] * PALETTE_ENTRIES)
+    flags: int = 0
 
 
 def build_header(header: Cin2Header) -> bytes:
+    if header.flags & ~FLAG_PACKED4:
+        raise ValueError("unknown CIN2 flags")
     if len(header.palette) != PALETTE_ENTRIES:
         raise ValueError(f"palette must have exactly {PALETTE_ENTRIES} entries")
     for entry in header.palette:
@@ -224,7 +232,7 @@ def build_header(header: Cin2Header) -> bytes:
     buf = bytearray(HEADER_BYTES)
     buf[0:4] = MAGIC
     buf[4] = VERSION
-    buf[5] = 0  # flags, reserved
+    buf[5] = header.flags
     struct.pack_into(
         "<HHLLL", buf, 6,
         header.width, header.height, header.fps_num, header.fps_den,
@@ -243,6 +251,8 @@ def parse_header(raw: bytes) -> Cin2Header:
         raise ValueError("bad magic")
     if raw[4] != VERSION:
         raise ValueError(f"unsupported version {raw[4]}")
+    if raw[5] & ~FLAG_PACKED4:
+        raise ValueError(f"unknown flags 0x{raw[5]:02X}")
 
     stored_crc = struct.unpack_from("<L", raw, 22)[0]
     computed_crc = crc32(raw[:CRC_BYTES])
@@ -258,11 +268,11 @@ def parse_header(raw: bytes) -> Cin2Header:
 
     return Cin2Header(
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
-        frame_count=frame_count, palette=palette,
+        frame_count=frame_count, palette=palette, flags=raw[5],
     )
 
 
-def encode_frame(indices: Sequence[int]) -> bytes:
+def encode_frame(indices: Sequence[int], packed4: bool = False) -> bytes:
     """indices: WIDTH*HEIGHT palette indices (0..15), row-major,
     top-to-bottom, left-to-right. Returns FRAME_BYTES bytes: one byte per
     pixel, unpacked -- this is exactly what lands in the calculator's
@@ -271,12 +281,18 @@ def encode_frame(indices: Sequence[int]) -> bytes:
         raise ValueError(f"expected {WIDTH * HEIGHT} indices, got {len(indices)}")
     if any(not (0 <= i <= 15) for i in indices):
         raise ValueError("palette indices must be 0..15 (only 16 palette entries exist)")
+    if packed4:
+        return bytes((indices[i] << 4) | indices[i + 1]
+                     for i in range(0, len(indices), 2))
     return bytes(indices)
 
 
-def decode_frame(raw: bytes) -> list[int]:
-    if len(raw) != FRAME_BYTES:
-        raise ValueError(f"expected {FRAME_BYTES} bytes, got {len(raw)}")
+def decode_frame(raw: bytes, packed4: bool = False) -> list[int]:
+    expected = PACKED4_FRAME_BYTES if packed4 else FRAME_BYTES
+    if len(raw) != expected:
+        raise ValueError(f"expected {expected} bytes, got {len(raw)}")
+    if packed4:
+        return [nibble for byte in raw for nibble in (byte >> 4, byte & 0x0F)]
     return list(raw)
 
 

@@ -114,7 +114,8 @@ test_encoder() {
     fi
     python3 -m pytest -q tests/test_cin2_format.py tests/test_encode_cin2.py \
         tests/test_fixtures.py tests/test_frame_rate_boundaries.py \
-        tests/test_fuzz_cin2_header.py
+        tests/test_fuzz_cin2_header.py tests/test_reliability_regressions.py \
+        tests/test_csu.py tests/test_subtitle_authoring.py tests/test_scheduler_math.py
 }
 
 run_step "cin2.c host unit tests"                   test_cin2

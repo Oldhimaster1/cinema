@@ -348,6 +348,7 @@ unsigned g_buffer_mode_fills = 0;
 void gfx_Begin(void) {}
 void gfx_End(void) {}
 void gfx_SwapDraw(void) {}
+void gfx_BlitScreen(void) {}
 /* No longer called by src/player_v2.c's real code (see its render_frame
  * comment for why -- graphx.h's own docs say the explicit wait this used
  * to pair with was redundant), but still defined here since the stub

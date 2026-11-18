@@ -52,11 +52,21 @@ def parse(t,report):
   report['longest_line']=max([report['longest_line']]+[len(x) for x in lines])
   out.append((a,z,lines))
  report['input_cues']=len(out);return out
-def convert(srt,output,name,frames,fps_num,fps_den,movie_size,report_path=None):
- report={'input':str(srt),'output':str(output),'input_cues':0,'output_cues':0,'one_line_cues':0,'two_line_cues':0,'wrapped_cues':0,'replacement_count':0,'replacements':[],'longest_line':0,'warnings':[],'result':'FAIL'}
+def convert(srt,output,name,frames,fps_num,fps_den,movie_size,report_path=None,start_offset_ms=0):
+ if start_offset_ms < 0:raise ValueError('subtitle start offset must be non-negative')
+ if frames <= 0 or fps_num <= 0 or fps_den <= 0:raise ValueError('invalid movie timing')
+ report={'input':str(srt),'output':str(output),'input_cues':0,'output_cues':0,'one_line_cues':0,'two_line_cues':0,'wrapped_cues':0,'replacement_count':0,'replacements':[],'longest_line':0,'skipped_cues':0,'start_offset_ms':start_offset_ms,'warnings':[],'result':'FAIL'}
  cues=parse(Path(srt).read_text(encoding='utf-8-sig'),report);rec=[];prev=0
  for i,(x,y,lines) in enumerate(cues,1):
-  start,end=frame(x,fps_num,fps_den),min(frames,frame(y,fps_num,fps_den))
+  # Subtitles use timestamps from the original source video. When the
+  # encoder trims the beginning, shift cues to the first encoded frame;
+  # discard cues outside the selected clip and clamp those at its edges.
+  if y <= start_offset_ms:
+   report['skipped_cues']+=1;continue
+  start=frame(max(0,x-start_offset_ms),fps_num,fps_den)
+  end=min(frames,frame(y-start_offset_ms,fps_num,fps_den))
+  if start >= frames:
+   report['skipped_cues']+=1;continue
   if start<prev:raise ValueError(f'cue {i}: overlaps preceding cue')
   if end<=start:raise ValueError(f'cue {i}: collapses after frame conversion')
   l1=lines[0].encode('ascii');l2=(lines[1] if len(lines)>1 else '').encode('ascii')
@@ -80,6 +90,6 @@ def convert(srt,output,name,frames,fps_num,fps_den,movie_size,report_path=None):
  print(f'report: {rp}')
  return report
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('srt',type=Path);ap.add_argument('output',type=Path);ap.add_argument('--name',required=True);ap.add_argument('--frames',type=int,required=True);ap.add_argument('--fps-num',type=int,required=True);ap.add_argument('--fps-den',type=int,default=1);ap.add_argument('--movie-size',type=int,required=True);ap.add_argument('--report',type=Path);a=ap.parse_args()
- convert(a.srt,a.output,a.name,a.frames,a.fps_num,a.fps_den,a.movie_size,a.report)
+ ap=argparse.ArgumentParser();ap.add_argument('srt',type=Path);ap.add_argument('output',type=Path);ap.add_argument('--name',required=True);ap.add_argument('--frames',type=int,required=True);ap.add_argument('--fps-num',type=int,required=True);ap.add_argument('--fps-den',type=int,default=1);ap.add_argument('--movie-size',type=int,required=True);ap.add_argument('--report',type=Path);ap.add_argument('--start-offset',type=float,default=0.0,help='seconds removed from the source video before encoding');a=ap.parse_args()
+ convert(a.srt,a.output,a.name,a.frames,a.fps_num,a.fps_den,a.movie_size,a.report,start_offset_ms=round(a.start_offset*1000))
 if __name__=='__main__':main()

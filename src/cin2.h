@@ -14,11 +14,10 @@
 #define CIN2_HEADER_BYTES  512
 #define CIN2_CRC_BYTES     22  /* bytes [0, 22) covered by header_crc32 */
 #define CIN2_DATA_LBA      1
-/* One byte per pixel (160*96 = 15,360 bytes = 30 sectors), not bit-packed:
- * see src/player_v2.c's frame_slot_t comment for why -- real hardware
- * testing traced most of v2's decode-ceiling gap to the CPU cost of
- * unpacking bit-packed pixels on the ez80 core, which outweighed the I/O
- * savings from packing them in the first place. */
+/* RAW8: one byte per pixel, 30 sectors per frame. Packed4: two palette
+ * indices per byte, 15 sectors per frame; rendered directly in fixed_asm.
+ * The older software-unpack-then-GraphX experiment was too slow, but the
+ * direct assembly Packed4 path is supported in the Beta 1 hardware build. */
 #define CIN2_FRAME_SECTORS 30
 #define CIN2_PACKED4_FRAME_SECTORS 15
 #define CIN2_FLAG_PACKED4 0x01u
@@ -124,7 +123,7 @@ static inline uint32_t cin2_frame_lba(uint32_t frame_number)
 }
 
 /* True if a frame_count-frame movie's data (header sector plus every
- * frame's 15 sectors) fits entirely within a drive reporting
+ * frame's 15 Packed4 or 30 RAW8 sectors) fits entirely within a drive reporting
  * drive_sectors total logical blocks. Uses 64-bit arithmetic so a
  * corrupt/hostile frame_count can't wrap 32-bit LBA math into looking
  * in-bounds. Callers must reject media where this returns false rather

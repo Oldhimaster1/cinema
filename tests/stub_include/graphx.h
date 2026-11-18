@@ -29,6 +29,7 @@ extern uint8_t gfx_vram_stub[GFX_LCD_HEIGHT][GFX_LCD_WIDTH];
 void gfx_Begin(void);
 void gfx_End(void);
 void gfx_SwapDraw(void);
+void gfx_BlitScreen(void);
 void gfx_Wait(void);
 
 typedef uint8_t gfx_buffer_t; /* opaque, matches upstream's internal enum */

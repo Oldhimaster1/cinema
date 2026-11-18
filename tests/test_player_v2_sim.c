@@ -456,6 +456,29 @@ static void test_empty_movie_rejected(void)
     CHECK(!ok, "zero-frame movie is rejected rather than looping forever");
 }
 
+static void test_packed4_requires_compatible_renderer(void)
+{
+    cin2_header_t header;
+    global_t global;
+    fat32ro_extent_map_t map = identity_map(31);
+    unsigned reads_before = g_async_reads;
+
+    memset(&header, 0, sizeof(header));
+    memset(&global, 0, sizeof(global));
+    header.flags = CIN2_FLAG_PACKED4;
+    header.width = CINEMA_V2_WIDTH;
+    header.height = CINEMA_V2_HEIGHT;
+    header.fps_num = 24;
+    header.fps_den = 1;
+    header.frame_count = 2;
+    global.usb = (usb_device_t)(uintptr_t)1;
+
+    CHECK(!player_v2_run(&global, &header, 0, &map, ""),
+          "GraphX build rejects packed input instead of rendering invalid pixels");
+    CHECK(g_async_reads == reads_before,
+          "Packed4 incompatibility is detected before any USB frame reads");
+}
+
 int main(void)
 {
     test_full_playback_no_resume();
@@ -468,6 +491,7 @@ int main(void)
     test_held_seek_key_does_not_terminate_playback();
     test_loop_toggle_restarts_from_beginning();
     test_empty_movie_rejected();
+    test_packed4_requires_compatible_renderer();
 
     if (g_failures == 0) {
         printf("All player_v2 simulation tests passed.\n");

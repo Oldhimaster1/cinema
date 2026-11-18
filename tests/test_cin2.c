@@ -301,7 +301,8 @@ static void test_frame_count_fits_drive(void)
 static void test_placement_extension(void)
 {
     uint8_t raw[CIN2_HEADER_BYTES];
-    cin2_header_t header = { 160, 96, 20, 1, 2, {0} };
+    cin2_header_t header = { .flags = 0, .width = 160, .height = 96,
+                             .fps_num = 20, .fps_den = 1, .frame_count = 2 };
     cin2_placement_t p = {0}, parsed;
     cin2_placement_context_t c = {0};
     uint8_t before[58];

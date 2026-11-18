@@ -22,6 +22,7 @@
 
 #define BROWSER_MAX_FILES     32
 #define BROWSER_VISIBLE_ROWS   7
+#define BROWSER_DURATION_LEN   16
 
 void putstr(const char *str)
 {
@@ -301,7 +302,7 @@ static uint32_t v2_resume_menu(const cin2_header_t *header, const char *filename
 
 
 #define MAP_CACHE_MAGIC 0x50414D43u
-#define MAP_CACHE_VERSION 3u
+#define MAP_CACHE_VERSION 4u
 
 typedef struct {
     uint32_t magic;
@@ -320,6 +321,8 @@ typedef struct {
     uint32_t header_crc;
     char filename[FAT32RO_MAX_NAME];
     uint8_t name_padding[3];
+    uint16_t modified_time;
+    uint16_t modified_date;
     uint32_t metadata_crc;
 } map_cache_metadata_t;
 
@@ -335,7 +338,7 @@ static void map_cache_appvar(char out[9], const fat32ro_volume_t *vol,
 }
 static bool normalize_map(fat32ro_extent_map_t *map, uint32_t file_size)
 {
-    uint32_t need=(file_size+511u)/512u, sum=0; uint16_t i;
+    uint32_t need=(uint32_t)(((uint64_t)file_size+511u)/512u), sum=0; uint16_t i;
     if (!map->extent_count || map->extent_count>FAT32RO_MAX_EXTENTS) return false;
     for(i=0;i<map->extent_count;++i){
         uint32_t left=need-sum;
@@ -354,10 +357,15 @@ static bool cached_map_is_sane(const fat32ro_volume_t *vol,
     uint64_t sum = 0;
     uint64_t data_end = (uint64_t)vol->first_data_sector
         + (uint64_t)vol->total_clusters * vol->sectors_per_cluster;
-    uint32_t needed = (entry->file_size + FAT32RO_SECTOR_BYTES - 1u)
-        / FAT32RO_SECTOR_BYTES;
+    uint32_t needed = (uint32_t)(((uint64_t)entry->file_size + FAT32RO_SECTOR_BYTES - 1u)
+        / FAT32RO_SECTOR_BYTES);
     if (map->extent_count == 0 || map->extent_count > FAT32RO_MAX_EXTENTS
-        || map->total_sectors != needed) return false;
+        || map->total_sectors != needed || entry->first_cluster < 2u) return false;
+    /* The physical first cluster is independently known from the FAT32
+     * directory entry; reject any cache mapping that disagrees with it. */
+    if ((uint64_t)map->extents[0].lba != (uint64_t)vol->first_data_sector
+        + (uint64_t)(entry->first_cluster - 2u) * vol->sectors_per_cluster)
+        return false;
     for (i = 0; i < map->extent_count; ++i) {
         uint64_t start = map->extents[i].lba;
         uint64_t end = start + map->extents[i].sectors;
@@ -393,6 +401,8 @@ static bool load_cached_map(const fat32ro_volume_t *vol,
         || g_map_cache_metadata.total_clusters != vol->total_clusters
         || g_map_cache_metadata.first_cluster != entry->first_cluster
         || g_map_cache_metadata.file_size != entry->file_size
+        || g_map_cache_metadata.modified_time != entry->modified_time
+        || g_map_cache_metadata.modified_date != entry->modified_date
         || g_map_cache_metadata.header_crc != header_crc
         || strncmp(g_map_cache_metadata.filename, entry->name, FAT32RO_MAX_NAME) != 0
         || g_map_cache_metadata.extent_count == 0
@@ -438,6 +448,8 @@ static void save_cached_map(const fat32ro_volume_t *vol,
     g_map_cache_metadata.total_clusters = vol->total_clusters;
     g_map_cache_metadata.first_cluster = entry->first_cluster;
     g_map_cache_metadata.file_size = entry->file_size;
+    g_map_cache_metadata.modified_time = entry->modified_time;
+    g_map_cache_metadata.modified_date = entry->modified_date;
     g_map_cache_metadata.total_sectors = map->total_sectors;
     g_map_cache_metadata.header_crc = header_crc;
     strncpy(g_map_cache_metadata.filename, entry->name, FAT32RO_MAX_NAME - 1);
@@ -616,7 +628,7 @@ static bool load_thumbnail(global_t *global, const fat32ro_volume_t *vol,
  * currently loaded into the thumbnail's palette slots. */
 static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
                              const fat32ro_dirent_t *entries, int count,
-                             const char (*durations)[8], const char (*formats)[4],
+                             const char (*durations)[BROWSER_DURATION_LEN], const char (*formats)[4],
                              uint8_t *header_sector, int *selection_io,
                              uint32_t page_number)
 {
@@ -645,19 +657,19 @@ static int run_file_browser(global_t *global, const fat32ro_volume_t *vol,
             gfx_PrintStringXY(page_line, BROWSER_TEXT_X, BROWSER_TITLE_Y + 9);
         }
         for (i = top; i < count && i < top + BROWSER_VISIBLE_ROWS; ++i) {
-            char line[FAT32RO_MAX_NAME + 12];
+            char line[64];
             char mark = (i == selected) ? '>' : ' ';
 
             if (entries[i].is_directory) {
-                sprintf(line, "%c[D] %s", mark, entries[i].name);
+                snprintf(line, sizeof(line), "%c[D] %s", mark, entries[i].name);
             } else if (formats != NULL && formats[i][0] != '\0'
                        && durations != NULL && durations[i][0] != '\0') {
-                sprintf(line, "%c[%s] %s %s", mark, formats[i], entries[i].name,
+                snprintf(line, sizeof(line), "%c[%s] %s %s", mark, formats[i], entries[i].name,
                         durations[i]);
             } else if (formats != NULL && formats[i][0] != '\0') {
-                sprintf(line, "%c[%s] %s", mark, formats[i], entries[i].name);
+                snprintf(line, sizeof(line), "%c[%s] %s", mark, formats[i], entries[i].name);
             } else {
-                sprintf(line, "%c[?] %s", mark, entries[i].name);
+                snprintf(line, sizeof(line), "%c[?] %s", mark, entries[i].name);
             }
             gfx_PrintStringXY(line, BROWSER_TEXT_X, BROWSER_ROW0_Y + (i - top) * BROWSER_ROW_H);
         }
@@ -729,10 +741,10 @@ static void format_duration(char *out, uint32_t frame_count, uint32_t fps_num, u
     uint32_t hours = seconds / 3600u;
 
     if (hours > 0) {
-        sprintf(out, "%lu:%02lu:%02lu", (unsigned long)hours,
+        snprintf(out, BROWSER_DURATION_LEN, "%lu:%02lu:%02lu", (unsigned long)hours,
                 (unsigned long)((seconds / 60u) % 60u), (unsigned long)(seconds % 60u));
     } else {
-        sprintf(out, "%lu:%02lu", (unsigned long)(seconds / 60u), (unsigned long)(seconds % 60u));
+        snprintf(out, BROWSER_DURATION_LEN, "%lu:%02lu", (unsigned long)(seconds / 60u), (unsigned long)(seconds % 60u));
     }
 }
 
@@ -775,7 +787,7 @@ static const char *peek_cin2_header_fast(global_t *global, const fat32ro_volume_
  * until then. */
 static void probe_browser_metadata(global_t *global, const fat32ro_volume_t *vol,
                                     const fat32ro_dirent_t *playable, int playable_count,
-                                    uint8_t *header_sector, char durations[][8],
+                                           uint8_t *header_sector, char durations[][BROWSER_DURATION_LEN],
                                     char formats[][4])
 {
     int i;
@@ -878,7 +890,7 @@ static bool try_fat32_multi_file(global_t *global, uint8_t *header_sector, bool 
     fat32ro_volume_t vol;
     static fat32ro_dirent_t playable[BROWSER_MAX_FILES];
     static fat32ro_extent_map_t movie_map;
-    static char durations[BROWSER_MAX_FILES][8];
+    static char durations[BROWSER_MAX_FILES][BROWSER_DURATION_LEN];
     static char formats[BROWSER_MAX_FILES][4];
     static uint32_t dir_stack[BROWSER_MAX_DEPTH];
     fat32ro_error_t mount_err;

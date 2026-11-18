@@ -16,6 +16,7 @@ nearest-neighbor 2x, matching src/player_v2.c's blit exactly).
 from __future__ import annotations
 
 import argparse
+import mmap
 import shutil
 import subprocess
 import sys
@@ -30,19 +31,32 @@ import cin2_format as fmt  # noqa: E402
 
 
 def read_movie(path: Path):
-    raw = path.read_bytes()
-    header = fmt.parse_header(raw[: fmt.HEADER_BYTES])
+    """Map the movie read-only; one-frame previews need no full-file RAM copy.
+
+    The returned mmap stays alive while its caller uses the frames and is
+    closed automatically when released. Works with either RAW8 or Packed4.
+    """
+    with path.open("rb") as stream:
+        if stream.seek(0, 2) < fmt.HEADER_BYTES:
+            raise ValueError("movie is shorter than the CIN2 header")
+        raw = mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+    try:
+        header = fmt.parse_header(raw[: fmt.HEADER_BYTES])
+    except BaseException:
+        raw.close()
+        raise
     return raw, header
 
 
 def frame_indices(raw: bytes, header: fmt.Cin2Header, frame_number: int) -> list[int]:
-    if frame_number >= header.frame_count:
-        raise ValueError(f"frame {frame_number} >= frame_count {header.frame_count}")
-    start = fmt.frame_lba(frame_number) * fmt.SECTOR_BYTES
-    end = start + fmt.FRAME_BYTES
+    if not 0 <= frame_number < header.frame_count:
+        raise ValueError(f"frame {frame_number} is outside 0..{header.frame_count - 1}")
+    packed4 = bool(header.flags & fmt.FLAG_PACKED4)
+    start = fmt.frame_lba(frame_number, header.flags) * fmt.SECTOR_BYTES
+    end = start + (fmt.PACKED4_FRAME_BYTES if packed4 else fmt.FRAME_BYTES)
     if end > len(raw):
         raise ValueError(f"frame {frame_number} data truncated in file")
-    return fmt.decode_frame(raw[start:end])
+    return fmt.decode_frame(raw[start:end], packed4=packed4)
 
 
 def indices_to_rgb_image(indices: list[int], header: fmt.Cin2Header) -> Image.Image:

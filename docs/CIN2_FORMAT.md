@@ -20,51 +20,43 @@ frame and re-installs the palette every frame.
 
 CIN2 uses one shared 16-color palette for the whole movie (stored once in
 the header, installed once at startup) instead of resending a palette
-every frame. A frame is then exactly:
+every frame. Two frame-storage modes are supported:
 
 ```
 160 * 96 = 15,360 bytes = 30 sectors
 ```
 
-one plain byte per pixel (0..15, indexing the shared palette), no
-bit-packing. At 24 fps: `30 * 512 * 24 = 368,640 bytes/s` (~360 KiB/s) --
-above the ~262-273 KiB/s documented throughput budget, so 24fps needs a
-fast drive; at more modest rates (say 15fps, ~225 KiB/s) it's comfortably
-within it. Either way, only one transfer and one callback per frame and
-zero per-frame palette installs, same as before.
+In RAW8 mode (flags 0), a frame is one byte per pixel (0..15), 30 sectors.
+At 24fps this requires ~360 KiB/s, above the ~262-273 KiB/s documented
+throughput of tested USB drives. At 15fps the requirement is ~225 KiB/s.
 
-An earlier version of CIN2 packed 2 pixels per byte (4 bits each) to
-halve this to 7,680 bytes/frame (15 sectors), trading the shared-palette
-win for actually *less* I/O than the original format at the same frame
-rate. Real-hardware testing found that packing was a net loss: it
-requires unpacking back into one-byte-per-pixel before
-`gfx_ScaledSprite_NoClip` can draw it (GraphX has no packed-4-bit sprite
-format), and that unpack step's CPU cost on the ez80 core -- which has no
-barrel shifter, so even a lookup-table-based unpack still costs a
-non-trivial number of instructions per byte -- outweighed the I/O it
-saved. Comparing against
-[wwierzbowski/cinema](https://github.com/wwierzbowski/cinema) (the
-original, unrelated project this one is a rewrite of) made this obvious
-in hindsight: its player reads frame pixels directly off USB into the
-exact buffer `gfx_ScaledSprite_NoClip` draws from, with no decode step of
-any kind, and reaches 10-11fps despite needing *more* I/O per frame
-(15,872 bytes) than CIN2's packed format ever did (7,680 bytes) --
-proving decode cost, not I/O, was the bottleneck packing never actually
-solved. CIN2 keeps the one real, uncontroversial win (a shared palette
-instead of one per frame) and drops the packing.
+In Packed4 mode (flags bit 0 set), a frame uses two 4-bit palette indices
+per byte: 7,680 bytes or 15 sectors. The **first** pixel is stored in the
+high nibble, the second in the low nibble. Packed4 needs only ~180 KiB/s
+at 24fps and ~225 KiB/s at 30fps, before command overhead. The
+specialized `fixed_asm` eZ80 renderer reads Packed4 directly; neither
+the default GraphX renderer nor fixed-C supports Packed4. Unsupported
+renderer builds reject Packed4 rather than showing incorrect pixels.
+
+An **earlier** Packed4 experiment unpacked the pixels in software before
+passing them to GraphX. Physical testing found the unpacking cost
+outweighed the I/O savings. The newer direct-drawing assembly renderer
+removes that intermediate unpacking step. Packed4 playback was tested on
+the specific Beta 1 calculator setup; its FPS still depends on the drive
+and renderer, and cannot be inferred from transfer rates alone.
 
 ## Drive layout
 
 ```
 LBA 0:            CIN2 header (512 bytes, one sector)
-LBA 1..30:        frame 0, one byte per pixel (15,360 bytes, 30 sectors)
-LBA 31..60:       frame 1
-LBA 61..90:       frame 2
+LBA 1..S:         frame 0
+LBA 1+S..2*S:     frame 1
+LBA 1+2*S..3*S:   frame 2
 ...
-LBA 1+30*n .. +29: frame n
+LBA 1+S*n .. +S-1: frame n
 ```
 
-Frame `n`'s first LBA is `1 + n * 30`. There is no per-frame header,
+`S` is 30 sectors for RAW8 or 15 for Packed4. There is no per-frame header,
 palette, or padding -- frames are back-to-back.
 
 ## Header (LBA 0, 512 bytes)
@@ -73,7 +65,7 @@ palette, or padding -- frames are back-to-back.
 |-------:|-----:|----------------|-----------------------------------------------------|
 | 0      | 4    | `magic`        | ASCII `"CIN2"` (0x43 0x49 0x4E 0x32)                |
 | 4      | 1    | `version`      | `2`                                                  |
-| 5      | 1    | `flags`        | reserved, must be `0`                                |
+| 5      | 1    | `flags`        | bit 0: Packed4; all other bits reserved/must be zero |
 | 6      | 2    | `width`        | u16, logical pixel width. Always `160` in v2.0       |
 | 8      | 2    | `height`       | u16, logical pixel height. Always `96` in v2.0       |
 | 10     | 4    | `fps_num`      | u32, frame rate numerator (e.g. `24` or `24000`)     |
@@ -102,14 +94,13 @@ the CPU budget. A reader that gets a bad header CRC must refuse to play
 rather than guess at corrupted `fps_num`/`frame_count`/`width`/`height`
 values, since those drive LBA arithmetic.
 
-## Frame payload (30 sectors = 15,360 bytes)
+## Frame payload
 
-Each frame is `width * height` bytes, one plain byte per palette index
-(0..15), row-major, top-to-bottom, left-to-right -- byte `y * width + x`
-is the index for pixel `(x, y)`. Not bit-packed: this is exactly what
-`msd_ReadAsync` deposits straight into the sprite buffer
-`gfx_ScaledSprite_NoClip` draws from (see `src/player_v2.c`), with no
-decode step in between at all. There is no row padding.
+RAW8 frames use 15,360 bytes, one palette index per byte in row-major
+order, which GraphX can draw directly. Packed4 frames use 7,680 bytes:
+each byte stores consecutive pixels `(p0 << 4) | p1`, high nibble first.
+The direct assembly renderer draws these without a separate unpack buffer.
+There is no row padding in either mode.
 
 ## Resume record (TI AppVar `SSCINEV2`)
 

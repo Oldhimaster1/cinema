@@ -387,6 +387,8 @@ static void test_list_root_finds_files_and_skips_others(void)
     format_disk(&l);
 
     write_dir_entry(&l, 2, 0, "MOVIE01 BIN", 0x20 /* archive */, 10, 12345);
+    put_u16le(g_disk[cluster_lba(&l, 2)] + 22, 0xA123);
+    put_u16le(g_disk[cluster_lba(&l, 2)] + 24, 0x5A31);
     write_dir_entry(&l, 2, 1, "SUBDIR     ", 0x10 /* directory */, 20, 0);
     write_dir_entry(&l, 2, 2, "VOLUME  LAB", 0x08 /* volume label */, 0, 0);
     write_dir_entry(&l, 2, 3, "LONGNAME~1 ", 0x0F /* LFN fragment marker */, 0, 0);
@@ -405,6 +407,8 @@ static void test_list_root_finds_files_and_skips_others(void)
     if (count == 3) {
         CHECK(strcmp(entries[0].name, "MOVIE01.BIN") == 0, "first entry name reconstructed correctly");
         CHECK(entries[0].first_cluster == 10, "first entry cluster correct");
+        CHECK(entries[0].modified_time == 0xA123 && entries[0].modified_date == 0x5A31,
+              "FAT32 last-write metadata is retained for cache invalidation");
         CHECK(entries[0].file_size == 12345, "first entry size correct");
         CHECK(!entries[0].is_directory, "MOVIE01.BIN is not flagged as a directory");
         CHECK(strcmp(entries[1].name, "SUBDIR") == 0, "subdirectory name reconstructed correctly");
@@ -657,6 +661,22 @@ static void test_extent_map_rejects_premature_end_of_chain(void)
           "a chain shorter than the declared file size is rejected, not read past");
 }
 
+static void test_near_4gib_file_does_not_wrap_to_zero_sectors(void)
+{
+    fs_layout_t l = standard_layout(0);
+    fat32ro_volume_t vol;
+    fat32ro_extent_map_t map;
+
+    reset_disk();
+    format_disk(&l);
+    set_fat_entry(&l, 10, 0x0FFFFFFF);
+    CHECK(fat32ro_mount(&vol, disk_read, NULL) == FAT32RO_SUCCESS,
+          "mount for 4GiB boundary test");
+    CHECK(fat32ro_build_extent_map(&vol, 10, UINT32_MAX, &map)
+              == FAT32RO_ERROR_CLUSTER_CHAIN,
+          "4GiB-minus-one file must require a real long FAT chain, not wrap to zero");
+}
+
 static void test_extent_map_rejects_infinite_loop(void)
 {
     fs_layout_t l = standard_layout(0);
@@ -801,6 +821,7 @@ int main(void)
     test_extent_map_zero_length_file();
     test_extent_map_rejects_invalid_first_cluster();
     test_extent_map_rejects_premature_end_of_chain();
+    test_near_4gib_file_does_not_wrap_to_zero_sectors();
     test_extent_map_rejects_infinite_loop();
     test_extent_map_too_fragmented_is_rejected_cleanly();
     test_extent_map_diagnostics_match_single_sector_cache();

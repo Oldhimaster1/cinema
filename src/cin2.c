@@ -131,7 +131,7 @@ bool cin2_validate_placement(const cin2_placement_t *m,
         || c->movie_first_cluster < 2u) return false;
 
     if (c->movie_file_size > UINT32_MAX - 511u) return false;
-    if (m->total_movie_sectors != (c->movie_file_size + 511u) / 512u) return false;
+    if (m->total_movie_sectors != (uint32_t)(((uint64_t)c->movie_file_size + 511u) / 512u)) return false;
     data_end = (uint64_t)c->first_data_lba
         + (uint64_t)c->total_data_clusters * c->sectors_per_cluster;
     cluster_offset = c->movie_first_cluster - 2u;

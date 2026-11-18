@@ -25,13 +25,11 @@ LTOFLAGS = -Wall -Wextra -O3
 #             a specific reason not to.
 #   fixed_c   -- Cinema's own specialized C implementation. Host-tested
 #               for pixel correctness; not yet tested on real hardware.
-#   fixed_asm -- same algorithm in hand-reviewed eZ80 assembly
-#               (src/render_v2_asm.s), generated from and checked
-#               against fixed_c. UNVERIFIED BY EXECUTION -- no ROM,
-#               emulator, or calculator was available to actually run it
-#               during development. Do not use for real playback without
-#               testing it yourself first (see that file's header
-#               comment and docs/RENDERER.md).
+#   fixed_asm -- direct eZ80 assembly renderer
+#               (src/render_v2_asm.s), checked against fixed_c. Packed4
+#               playback was physically tested on the Beta 1 setup; any
+#               later rebuild still needs a new on-calculator regression
+#               test (see docs/HARDWARE_TEST_PLAN.md).
 # Override on the command line, e.g. `make CINEMA_RENDERER=fixed_c`.
 CINEMA_RENDERER ?= graphx
 CINEMA_BUILD ?= production

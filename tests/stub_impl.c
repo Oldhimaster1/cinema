@@ -68,6 +68,7 @@ uint8_t boot_GetBatteryStatus(void) { return 0; }
 void gfx_Begin(void) {}
 void gfx_End(void) {}
 void gfx_SwapDraw(void) {}
+void gfx_BlitScreen(void) {}
 void gfx_Wait(void) {}
 void gfx_SetDraw(gfx_buffer_t mode) { (void)mode; }
 void gfx_ZeroScreen(void) {}

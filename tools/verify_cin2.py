@@ -54,20 +54,29 @@ def verify(path: Path) -> dict:
     result: dict = {"file": str(path)}
 
     try:
-        raw = path.read_bytes()
+        import hashlib
+        digest = hashlib.sha256()
+        file_size = 0
+        with path.open("rb") as stream:
+            header_raw = stream.read(HEADER_BYTES)
+            digest.update(header_raw)
+            file_size += len(header_raw)
+            while True:
+                block = stream.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                file_size += len(block)
     except OSError as exc:
-        return {"ok": False, "errors": [f"cannot read file: {exc}"], "warnings": []}
+        return {"file": str(path), "ok": False,
+                "errors": [f"cannot read file: {exc}"], "warnings": []}
 
-    result["file_size"] = len(raw)
+    result["file_size"] = file_size
+    result["sha256"] = digest.hexdigest()
 
-    import hashlib
-    result["sha256"] = hashlib.sha256(raw).hexdigest()
-
-    if len(raw) < HEADER_BYTES:
-        fail(errors, f"file shorter than header ({len(raw)} < {HEADER_BYTES} bytes)")
+    if file_size < HEADER_BYTES:
+        fail(errors, f"file shorter than header ({file_size} < {HEADER_BYTES} bytes)")
         return {"ok": False, "errors": errors, "warnings": warnings, **result}
-
-    header_raw = raw[:HEADER_BYTES]
 
     # --- magic / version -------------------------------------------------
     magic = header_raw[0:4]
@@ -146,13 +155,13 @@ def verify(path: Path) -> dict:
     if frame_count == 0:
         fail(errors, "frame_count is zero (movie has no frames)")
 
-    if len(raw) < required_bytes:
-        fail(errors, f"file truncated: {len(raw)} bytes present, "
+    if file_size < required_bytes:
+        fail(errors, f"file truncated: {file_size} bytes present, "
                       f"{required_bytes} required for {frame_count} frames "
-                      f"(missing {required_bytes - len(raw)} bytes -- "
+                      f"(missing {required_bytes - file_size} bytes -- "
                       "final frame(s) incomplete)")
-    elif len(raw) > required_bytes:
-        warnings.append(f"{len(raw) - required_bytes} bytes of unexpected trailing "
+    elif file_size > required_bytes:
+        warnings.append(f"{file_size - required_bytes} bytes of unexpected trailing "
                          "data after the last frame")
 
     # --- palette sanity (informational; any 16-bit value is technically

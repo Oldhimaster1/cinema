@@ -388,6 +388,8 @@ int fat32ro_list_directory(const fat32ro_volume_t *vol, uint32_t first_cluster,
                     out[count].first_cluster =
                         ((uint32_t)read_u16le(raw + 20) << 16) | read_u16le(raw + 26);
                     out[count].file_size = is_dir ? 0 : read_u32le(raw + 28);
+                    out[count].modified_time = read_u16le(raw + 22);
+                    out[count].modified_date = read_u16le(raw + 24);
                     out[count].is_directory = is_dir;
                     count++;
                 }
@@ -445,6 +447,8 @@ int fat32ro_list_directory_page(const fat32ro_volume_t *vol, uint32_t first_clus
                 e.is_directory=(attr&0x10)!=0; format_short_name(raw,e.name);
                 e.first_cluster=((uint32_t)read_u16le(raw+20)<<16)|read_u16le(raw+26);
                 e.file_size=e.is_directory?0:read_u32le(raw+28);
+                e.modified_time=read_u16le(raw+22);
+                e.modified_date=read_u16le(raw+24);
                 if (!filter(&e,filter_ctx)) continue;
                 if (matched++ < skip_matches) continue;
                 if (count<max_entries) out[count++]=e;
@@ -544,7 +548,8 @@ fat32ro_error_t fat32ro_build_extent_map(const fat32ro_volume_t *vol,
         return FAT32RO_ERROR_CLUSTER_CHAIN;
     }
 
-    needed_sectors = (file_size_bytes + FAT32RO_SECTOR_BYTES - 1) / FAT32RO_SECTOR_BYTES;
+    needed_sectors = (uint32_t)(((uint64_t)file_size_bytes + FAT32RO_SECTOR_BYTES - 1u)
+                                / FAT32RO_SECTOR_BYTES);
 
     cluster = first_cluster;
     run_start_cluster = first_cluster;

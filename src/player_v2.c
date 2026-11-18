@@ -886,7 +886,7 @@ static bool subtitle_stream_read_single_sector(void *ctx,uint32_t offset,uint8_t
                 &&sector>=player->subtitle_bulk_first_sector
                 &&sector-player->subtitle_bulk_first_sector<player->subtitle_bulk_sector_count;
             if(!hit){
-                uint32_t total_sectors=(player->subtitle_size+511u)/512u;
+                uint32_t total_sectors=(uint32_t)(((uint64_t)player->subtitle_size+511u)/512u);
                 uint32_t count;
                 if(player->global->usb==NULL
                    ||!fat32ro_extent_lookup(player->subtitle_map,sector,&lba,&run))return false;
@@ -1324,6 +1324,7 @@ static bool save_resume_state(const player_v2_t *player)
     return false;
 }
 
+#ifdef CINEMA_DIAGNOSTIC
 static void diagnostic_wait_key(void)
 {
 #if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM
@@ -1603,6 +1604,7 @@ static void print_playback_summary(const player_v2_t *player)
     }
 #endif
 }
+#endif /* CINEMA_DIAGNOSTIC */
 
 /* True once the last frame of the movie has been presented. */
 static bool playback_finished(const player_v2_t *player)
@@ -1886,6 +1888,18 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
         putstr("movie has no frames");
         return false;
     }
+
+    /* Packed4 is drawn directly by the specialized eZ80 renderer. The
+     * GraphX and fixed-C paths expect one byte per pixel and would render
+     * packed bytes as incorrect colors (and could read stale slot data).
+     * Reject unsupported builds before queueing any USB reads. The
+     * physically tested fixed_asm release path remains unchanged. */
+#if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM
+    if (header->flags & CIN2_FLAG_PACKED4) {
+        putstr("Packed4 requires the fixed_asm Cinema build");
+        return false;
+    }
+#endif
 
     memset(&player, 0, sizeof(player));
     player.slot_count = PRIMARY_SLOT_COUNT;

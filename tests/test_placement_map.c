@@ -5,7 +5,7 @@ static int fails;
 #define CHECK(x,m) do { if (!(x)) { printf("FAIL: %s\n",m); fails++; } } while (0)
 static void make_case(uint8_t *raw, fat32ro_volume_t *v, fat32ro_dirent_t *e)
 {
-    cin2_header_t h = {160,96,20,1,2,{0}};
+    cin2_header_t h = {.flags=0,.width=160,.height=96,.fps_num=20,.fps_den=1,.frame_count=2};
     cin2_placement_t p;
     memset(v,0,sizeof(*v)); memset(e,0,sizeof(*e)); memset(&p,0,sizeof(p));
     v->sectors_per_cluster=4; v->volume_serial=0x12345678;
@@ -39,7 +39,7 @@ int main(void)
     CHECK(!placement_map_from_header(raw,&v,&e,&out),"wrong first cluster rejected");
     e.first_cluster--; raw[CIN2_PLACEMENT_EXTENTS_OFFSET]^=1;
     CHECK(!placement_map_from_header(raw,&v,&e,&out),"corrupt extent rejected");
-    cin2_build_header(raw,&(cin2_header_t){160,96,20,1,2,{0}});
+    cin2_build_header(raw,&(cin2_header_t){.flags=0,.width=160,.height=96,.fps_num=20,.fps_den=1,.frame_count=2});
     CHECK(!placement_map_from_header(raw,&v,&e,&out),"missing placement rejected");
     if (!fails) { puts("All placement-map tests passed."); return 0; }
     return 1;

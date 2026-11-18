@@ -102,6 +102,8 @@ typedef struct {
     char name[FAT32RO_MAX_NAME]; /* reconstructed "NAME.EXT", trailing spaces trimmed */
     uint32_t first_cluster;
     uint32_t file_size;    /* 0 for directories -- FAT32 doesn't size them */
+    uint16_t modified_time; /* FAT32 last-write time, 2-second resolution */
+    uint16_t modified_date;
     bool is_directory;
 } fat32ro_dirent_t;
 
