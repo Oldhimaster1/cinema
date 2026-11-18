@@ -2038,3 +2038,228 @@ _render_scaled_packed4_asm:
 	ret
 .Lp4end:
 	.size	_render_scaled_packed4_asm, .Lp4end-_render_scaled_packed4_asm
+
+; Experimental Packed4 renderer A: expand each packed byte once and write
+; both destination rows. Kept separate until physical timing proves a win:
+; indexed IY stores may cost more than the saved nibble operations.
+	.section	.text._render_scaled_packed4_dual_asm,"ax",@progbits
+	.globl	_render_scaled_packed4_dual_asm
+	.type	_render_scaled_packed4_dual_asm,@function
+_render_scaled_packed4_dual_asm:
+	push	ix
+	ld	ix, 0
+	add	ix, sp
+	push	iy
+	ld	hl, (ix + 6)
+	ld	de, (0xE30014)
+	push	hl
+	ld	hl, 7680
+	add	hl, de
+	ex	de, hl
+	pop	hl
+	ld	a, 96
+.Lp4dualrow:
+	push	af
+	push	de
+	pop	iy
+	ld	bc, 320
+	add	iy, bc
+	ld	b, 80
+.Lp4dualbyte:
+	ld	a, (hl)
+	inc	hl
+	ld	c, a
+	and	0F0h
+	rrca
+	rrca
+	rrca
+	rrca
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	ld	(iy + 0), a
+	inc	iy
+	ld	(iy + 0), a
+	inc	iy
+	ld	a, c
+	and	0Fh
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	ld	(iy + 0), a
+	inc	iy
+	ld	(iy + 0), a
+	inc	iy
+	djnz	.Lp4dualbyte
+	push	iy
+	pop	de
+	pop	af
+	dec	a
+	jr	nz, .Lp4dualrow
+	pop	iy
+	pop	ix
+	ret
+.Lp4dualend:
+	.size	_render_scaled_packed4_dual_asm, .Lp4dualend-_render_scaled_packed4_dual_asm
+
+; Experimental Packed4 renderer B: same exact stores as the original but
+; four packed bytes per DJNZ branch. Code-size/speed tradeoff to measure.
+	.macro CINEMA_P4_EXPAND_ONE
+	ld	a, (hl)
+	inc	hl
+	ld	c, a
+	and	0F0h
+	rrca
+	rrca
+	rrca
+	rrca
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	ld	a, c
+	and	0Fh
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	.endm
+	.section	.text._render_scaled_packed4_unrolled_asm,"ax",@progbits
+	.globl	_render_scaled_packed4_unrolled_asm
+	.type	_render_scaled_packed4_unrolled_asm,@function
+_render_scaled_packed4_unrolled_asm:
+	push	ix
+	ld	ix, 0
+	add	ix, sp
+	push	iy
+	ld	hl, (ix + 6)
+	ld	de, (0xE30014)
+	push	hl
+	ld	hl, 7680
+	add	hl, de
+	ex	de, hl
+	pop	hl
+	ld	a, 96
+.Lp4unrollrow:
+	push	af
+	push	hl
+	ld	b, 20
+.Lp4unrollpass1:
+	.rept 4
+	CINEMA_P4_EXPAND_ONE
+	.endr
+	dec	b
+	jp	nz, .Lp4unrollpass1
+	pop	hl
+	ld	b, 20
+.Lp4unrollpass2:
+	.rept 4
+	CINEMA_P4_EXPAND_ONE
+	.endr
+	dec	b
+	jp	nz, .Lp4unrollpass2
+	pop	af
+	dec	a
+	jp	nz, .Lp4unrollrow
+	pop	iy
+	pop	ix
+	ret
+.Lp4unrollend:
+	.size	_render_scaled_packed4_unrolled_asm, .Lp4unrollend-_render_scaled_packed4_unrolled_asm
+
+; Experimental Packed4 renderer C: aligned nibble->pixel lookup table.
+; Use a 256-byte-aligned table so setting L to nibble*2 addresses it without
+; an ADD/ADC carry chain. Indexed IY loads may lose the saved shifts, so this
+; is strictly an A/B candidate until run on a real calculator.
+	.section	.rodata.cinema_p4_nibbles,"a",@progbits
+	.balign 256
+.Lcinema_p4_nibbles:
+	.byte 0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7
+	.byte 8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15
+
+	.section	.text._render_scaled_packed4_lut_asm,"ax",@progbits
+	.globl	_render_scaled_packed4_lut_asm
+	.type	_render_scaled_packed4_lut_asm,@function
+_render_scaled_packed4_lut_asm:
+	push	ix
+	ld	ix, 0
+	add	ix, sp
+	push	iy
+	ld	hl, (ix + 6)
+	push	hl
+	pop	iy
+	ld	de, (0xE30014)
+	push	hl
+	ld	hl, 7680
+	add	hl, de
+	ex	de, hl
+	pop	hl
+	ld	a, 96
+.Lp4lutrow:
+	push	af
+	push	iy
+	ld	b, 80
+.Lp4lutpass1:
+	ld	a, (iy + 0)
+	inc	iy
+	ld	c, a
+	and	0F0h
+	rrca
+	rrca
+	rrca
+	ld	hl, .Lcinema_p4_nibbles
+	ld	l, a
+	ld	a, (hl)
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	ld	a, c
+	and	0Fh
+	add	a, a
+	ld	hl, .Lcinema_p4_nibbles
+	ld	l, a
+	ld	a, (hl)
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	djnz	.Lp4lutpass1
+	pop	iy
+	ld	b, 80
+.Lp4lutpass2:
+	ld	a, (iy + 0)
+	inc	iy
+	ld	c, a
+	and	0F0h
+	rrca
+	rrca
+	rrca
+	ld	hl, .Lcinema_p4_nibbles
+	ld	l, a
+	ld	a, (hl)
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	ld	a, c
+	and	0Fh
+	add	a, a
+	ld	hl, .Lcinema_p4_nibbles
+	ld	l, a
+	ld	a, (hl)
+	ld	(de), a
+	inc	de
+	ld	(de), a
+	inc	de
+	djnz	.Lp4lutpass2
+	pop	af
+	dec	a
+	jp	nz, .Lp4lutrow
+	pop	iy
+	pop	ix
+	ret
+.Lp4lutend:
+	.size	_render_scaled_packed4_lut_asm, .Lp4lutend-_render_scaled_packed4_lut_asm

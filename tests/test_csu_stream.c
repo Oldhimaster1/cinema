@@ -16,6 +16,16 @@ static void wr32(uint8_t *p,uint32_t v){cinema_wr32(p,v);}
 
 int main(void)
 {
+    if(csu_movie_id("MOVIE.BIN",100,24,1,768512)!=0x75249756u)return 1;
+    if(csu_movie_id("Movie.bin",20,24,1,307712)!=0x23C96938u)return 1;
+    uint32_t adjusted=0;
+    if(csu_adjust_frame(&adjusted,0,100,20,1,100))return 1;
+    if(!csu_adjust_frame(&adjusted,2,100,20,1,100)||adjusted!=0)return 1;
+    if(!csu_adjust_frame(&adjusted,98,100,20,1,-50)||adjusted!=99)return 1;
+    if(csu_adjust_frame(&adjusted,99,100,20,1,-50))return 1;
+    if(!csu_adjust_frame(&adjusted,10,100,24000,1001,25)||adjusted!=9)return 1;
+    if(!csu_adjust_frame(&adjusted,10,100,20,1,0)||adjusted!=10)return 1;
+    if(csu_adjust_frame(&adjusted,10,0,20,1,0))return 1;
     const uint32_t count=1000,frames=5000,id=0x12345678u;
     size_t n=40u+72u*count,i;
     uint8_t *b=calloc(1,n);
@@ -34,6 +44,9 @@ int main(void)
     }
     wr32(b+32,cinema_crc32_zeroed(b,n,32,4));
     m.p=b;m.n=n;m.reads=0;
+    if(csu_stream_open_fast(&h,rd,&m,(uint32_t)n,id^1u,frames,20,1))return 1;
+    if(!csu_stream_open_fast(&h,rd,&m,(uint32_t)n,id,frames,20,1))return 1;
+    m.reads=0;
     if(n<=65536||!csu_stream_validate(&h,rd,&m,(uint32_t)n,id,frames,20,1))return 1;
     if(m.reads!=expected_validation_reads){
         fprintf(stderr,"validation read regression: got %u expected %u\n",m.reads,expected_validation_reads);

@@ -27,4 +27,12 @@ int32_t csu_stream_find_cue(const csu_header_t *h,csu_stream_read_t read_cb,
 int32_t csu_stream_find_at_or_after(const csu_header_t *h,csu_stream_read_t read_cb,
                                     void *ctx,uint32_t frame);
 bool csu_stream_read_cue(csu_cue_t *out,csu_stream_read_t read_cb,void *ctx,uint32_t index);
+/* Returns false when a delay shifts outside the movie (no subtitle).
+ * This matters at frame zero: clamping to zero made first-cue subtitles
+ * appear before their requested positive delay had elapsed. */
+bool csu_adjust_frame(uint32_t *out,uint32_t frame,uint32_t total_frames,
+                      uint32_t fps_num,uint32_t fps_den,int32_t delay_ms);
+/* Matches tools/csu_common.movie_id, using the exact FAT32 movie filename. */
+uint32_t csu_movie_id(const char *filename,uint32_t frames,uint32_t fps_num,
+                      uint32_t fps_den,uint32_t movie_file_size);
 #endif

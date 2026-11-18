@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <tice.h>
+#include <graphx.h>
 
 /* From tests/stub_impl_sim.c */
 extern void sim_set_drive(const uint8_t *drive, uint32_t sector_count);
@@ -25,6 +26,11 @@ extern unsigned g_async_reads;
 extern unsigned g_frames_rendered;
 extern unsigned g_screen_mode_fills;
 extern unsigned g_buffer_mode_fills;
+extern unsigned g_palette_updates;
+extern uint16_t g_palette_last[16];
+extern char g_last_screen_text[100];
+extern unsigned g_glyph_generations;
+extern uint8_t gfx_vram_stub[GFX_LCD_HEIGHT][GFX_LCD_WIDTH];
 
 /* All these tests use a raw single-image synthetic drive (see
  * build_synthetic_drive below), so movie_map is always the identity
@@ -121,6 +127,90 @@ static void test_full_playback_no_resume(void)
               "resume record points at the last frame shown");
     }
 
+    free(drive);
+}
+
+static void test_new_player_controls_with_performance_monitor(void)
+{
+    uint32_t sectors;
+    uint8_t *drive = build_synthetic_drive(30, &sectors);
+    global_t global;
+    cin2_header_t header;
+    fat32ro_extent_map_t map = identity_map(sectors);
+    unsigned palette_updates_before = g_palette_updates;
+    bool ok;
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    sim_set_drive(drive, sectors);
+    CHECK(cin2_parse_header(drive, &header), "controls test CIN2 header parses");
+    sim_reset_injected_keys();
+    sim_inject_key_at_call(1, sk_Add);   /* brightness: +1 */
+    sim_inject_key_at_call(2, sk_Mul);   /* contrast: 110% */
+    sim_inject_key_at_call(3, sk_Trace); /* speed: 125% */
+    sim_inject_key_at_call(4, sk_Zoom);  /* back to 100% */
+    sim_inject_key_at_call(5, sk_Trace); /* again 125% */
+    g_frames_rendered = 0;
+    player_v2_set_performance_monitor(true);
+    ok = player_v2_run(&global, &header, 0, &map, "");
+    player_v2_set_performance_monitor(false);
+    sim_reset_injected_keys();
+    CHECK(ok, "new control key sequence does not break playback");
+    CHECK(g_frames_rendered == 30, "controls preserve every displayed frame");
+    CHECK(g_palette_updates >= palette_updates_before + 3,
+          "palette updated initially and for brightness/contrast inputs");
+    CHECK(g_palette_last[5] != header.palette[5],
+          "brightness/contrast recolored a source palette entry");
+    CHECK(strstr(g_last_screen_text, "125%") != NULL,
+          "monitor readout reports the final selected speed");
+    CHECK(strstr(g_last_screen_text, "C110") != NULL,
+          "monitor readout reports changed contrast");
+    free(drive);
+}
+
+static void test_subtitle_cached_once_across_repeated_frames(void)
+{
+    uint32_t video_sectors;
+    uint8_t *video = build_synthetic_drive(20, &video_sectors);
+    uint8_t *drive = realloc(video, (size_t)(video_sectors + 1) * 512u);
+    uint8_t *csu;
+    uint8_t sector_cache[512];
+    fat32ro_extent_map_t movie_map = identity_map(video_sectors);
+    fat32ro_extent_map_t subtitle_map;
+    global_t global;
+    cin2_header_t header;
+    unsigned glyph_before = g_glyph_generations;
+    bool ok;
+    if (!drive) { free(video); CHECK(false, "subtitle test alloc"); return; }
+    memset(drive + (size_t)video_sectors * 512u, 0, 512);
+    csu = drive + (size_t)video_sectors * 512u;
+    memcpy(csu, "CSU1", 4); csu[4] = 1;
+    csu[6] = 40; csu[8] = 72;
+    csu[12] = 1; /* one cue */
+    csu[20] = 20; /* frame count */
+    csu[24] = 24; csu[28] = 1;
+    csu[40 + 4] = 20; /* end frame */
+    csu[40 + 8] = 1; /* one line */
+    csu[40 + 9] = 1; /* one character */
+    csu[40 + 12] = 'A';
+    memset(&subtitle_map, 0, sizeof(subtitle_map));
+    subtitle_map.extent_count = 1;
+    subtitle_map.extents[0].lba = video_sectors;
+    subtitle_map.extents[0].sectors = 1;
+    subtitle_map.total_sectors = 1;
+    memset(&global, 0, sizeof(global));
+    global.usb = (usb_device_t)(uintptr_t)1;
+    memset(gfx_vram_stub, 0, sizeof(gfx_vram_stub));
+    sim_set_drive(drive, video_sectors + 1);
+    CHECK(cin2_parse_header(drive, &header), "subtitle test CIN2 header");
+    player_v2_set_subtitle_stream(&subtitle_map, 112, 0, true, sector_cache);
+    g_frames_rendered = 0;
+    ok = player_v2_run(&global, &header, 0, &movie_map, "");
+    CHECK(ok, "subtitle sidecar playback finishes without error");
+    CHECK(g_frames_rendered == 20, "all subtitle-covered frames displayed");
+    CHECK(g_glyph_generations == glyph_before + 1,
+          "the same character is rasterized only once across 20 movie frames");
+    CHECK(gfx_vram_stub[204][156] == 15,
+          "cached foreground mask is painted at the centered subtitle position");
     free(drive);
 }
 
@@ -482,6 +572,8 @@ static void test_packed4_requires_compatible_renderer(void)
 int main(void)
 {
     test_full_playback_no_resume();
+    test_new_player_controls_with_performance_monitor();
+    test_subtitle_cached_once_across_repeated_frames();
     test_sustained_slow_reads_still_show_every_frame();
     test_resume_starts_mid_movie();
     test_read_error_is_fatal_and_reported();

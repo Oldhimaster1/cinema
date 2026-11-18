@@ -108,6 +108,10 @@ void render_scaled_fixed_c(const unsigned char *src);
  * the unverified-by-execution caveat before enabling this. */
 void render_scaled_fixed_asm(const unsigned char *src);
 void render_scaled_packed4_asm(const unsigned char *src);
+/* Experimental Packed4 variants for hardware A/B profiling. Not default. */
+void render_scaled_packed4_dual_asm(const unsigned char *src);
+void render_scaled_packed4_unrolled_asm(const unsigned char *src);
+void render_scaled_packed4_lut_asm(const unsigned char *src);
 #endif
 
 #endif

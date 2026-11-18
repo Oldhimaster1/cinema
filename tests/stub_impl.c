@@ -92,5 +92,8 @@ void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
 { (void)x; (void)y; (void)width; (void)height; }
 uint8_t gfx_SetTextFGColor(uint8_t color) { (void)color; return 0; }
 uint8_t gfx_SetTextBGColor(uint8_t color) { (void)color; return 0; }
+uint8_t gfx_SetTransparentColor(uint8_t index) { (void)index; return 0; }
+gfx_sprite_t *gfx_GetSpriteChar(char c) { static uint8_t g[66] = {8, 8}; (void)c; return (gfx_sprite_t *)g; }
+void gfx_TransparentSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x, uint8_t y) { (void)sprite; (void)x; (void)y; }
 void gfx_PrintStringXY(const char *string, int x, int y)
 { (void)string; (void)x; (void)y; }

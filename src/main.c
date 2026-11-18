@@ -64,6 +64,9 @@ static void settings_draw(const cinema_settings_t *work, int row)
     sprintf(line, "%c Remember position: %s", row == 3 ? '>' : ' ',
             (work->flags & CINEMA_SETTING_REMEMBER) ? "ON" : "OFF");
     putstr(line);
+    sprintf(line, "%c Performance monitor: %s", row == 4 ? '>' : ' ',
+            (work->flags & CINEMA_SETTING_PERF_MONITOR) ? "ON" : "OFF");
+    putstr(line);
     putstr("left/right toggles");
     putstr("enter saves, clear cancels");
 }
@@ -88,11 +91,11 @@ static void settings_screen(void)
 
         switch (key) {
             case sk_Up:
-                row = (row + 3) % 4;
+                row = (row + 4) % 5;
                 redraw = true;
                 break;
             case sk_Down:
-                row = (row + 1) % 4;
+                row = (row + 1) % 5;
                 redraw = true;
                 break;
             case sk_Left:
@@ -853,8 +856,10 @@ static void play_fat_file(global_t *global, const fat32ro_volume_t *vol,
         if (start_frame == V2_RESUME_CANCEL) return;
         uint32_t subtitle_size = map_subtitle_sidecar(vol,directory_cluster,entry);
         player_v2_set_packed_extra_storage(g_thumb_sprite_data,sizeof(g_thumb_sprite_data));
+        player_v2_set_performance_monitor((g_settings.flags & CINEMA_SETTING_PERF_MONITOR) != 0);
         player_v2_set_subtitle_stream(subtitle_size ? &g_thumb_map : NULL, subtitle_size,
-            cin2_crc32(header_sector, CIN2_CRC_BYTES),
+            csu_movie_id(entry->name,header.frame_count,header.fps_num,
+                         header.fps_den,entry->file_size),
             (g_settings.flags & CINEMA_SETTING_SUBTITLES) != 0, header_sector);
         *played_ok = player_v2_run(global, &header, start_frame, movie_map, resume_key);
     }
@@ -1124,6 +1129,7 @@ int main(void)
                 start_frame = v2_resume_menu(&v2_header, resume_key);
                 if (start_frame == V2_RESUME_CANCEL) goto normal_cleanup;
                 build_raw_identity_map(&raw_map, msdinfo.bnum);
+                player_v2_set_performance_monitor((g_settings.flags & CINEMA_SETTING_PERF_MONITOR) != 0);
                 player_ok = player_v2_run(&global, &v2_header, start_frame, &raw_map, resume_key);
             }
         }

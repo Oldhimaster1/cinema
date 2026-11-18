@@ -57,5 +57,8 @@ void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
 uint8_t gfx_SetTextFGColor(uint8_t color);
 uint8_t gfx_SetTextBGColor(uint8_t color);
 void gfx_PrintStringXY(const char *string, int x, int y);
+uint8_t gfx_SetTransparentColor(uint8_t index);
+gfx_sprite_t *gfx_GetSpriteChar(char c);
+void gfx_TransparentSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x, uint8_t y);
 
 #endif

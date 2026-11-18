@@ -336,6 +336,12 @@ void putstr(const char *str) { printf("[calc] %s\n", str); }
 /* --- graphx stub --------------------------------------------------- */
 
 unsigned g_frames_rendered = 0;
+unsigned g_palette_updates = 0;
+uint16_t g_palette_last[16];
+char g_last_screen_text[100];
+unsigned g_glyph_generations = 0;
+static uint8_t g_text_fg = 0;
+static uint8_t g_text_bg = 0;
 
 /* Tracks which target (screen vs offscreen buffer) is currently
  * selected, and how many rectangle fills landed on each -- lets tests
@@ -357,7 +363,11 @@ void gfx_Wait(void) {}
 void gfx_SetDraw(gfx_buffer_t mode) { g_draw_mode = mode; }
 void gfx_ZeroScreen(void) {}
 void gfx_SetPalette(const void *palette, uint24_t size, uint8_t offset)
-{ (void)palette; (void)size; (void)offset; }
+{
+    g_palette_updates++;
+    if (offset == 0 && size >= sizeof(g_palette_last))
+        memcpy(g_palette_last, palette, sizeof(g_palette_last));
+}
 gfx_sprite_t *gfx_AllocSprite(uint8_t width, uint8_t height,
                                void *(*alloc_routine)(size_t))
 {
@@ -396,7 +406,24 @@ void gfx_FillRectangle_NoClip(uint24_t x, uint8_t y, uint24_t width,
         g_buffer_mode_fills++;
     }
 }
-uint8_t gfx_SetTextFGColor(uint8_t color) { (void)color; return 0; }
-uint8_t gfx_SetTextBGColor(uint8_t color) { (void)color; return 0; }
+uint8_t gfx_SetTextFGColor(uint8_t color) { uint8_t old = g_text_fg; g_text_fg = color; return old; }
+uint8_t gfx_SetTextBGColor(uint8_t color) { uint8_t old = g_text_bg; g_text_bg = color; return old; }
+uint8_t gfx_SetTransparentColor(uint8_t index) { (void)index; return 0; }
+gfx_sprite_t *gfx_GetSpriteChar(char c)
+{
+    static uint8_t g[66] = {8, 8};
+    uint8_t row;
+    (void)c;
+    for (row = 0; row < 8; ++row) {
+        memset(g + 2 + (unsigned)row * 8, g_text_bg, 8);
+        g[2 + (unsigned)row * 8] = g_text_fg;
+    }
+    g_glyph_generations++;
+    return (gfx_sprite_t *)g;
+}
+void gfx_TransparentSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x, uint8_t y) { (void)sprite; (void)x; (void)y; }
 void gfx_PrintStringXY(const char *string, int x, int y)
-{ (void)string; (void)x; (void)y; }
+{
+    (void)x; (void)y;
+    snprintf(g_last_screen_text, sizeof(g_last_screen_text), "%s", string);
+}

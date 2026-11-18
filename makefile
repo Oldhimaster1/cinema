@@ -32,6 +32,29 @@ LTOFLAGS = -Wall -Wextra -O3
 #               test (see docs/HARDWARE_TEST_PLAN.md).
 # Override on the command line, e.g. `make CINEMA_RENDERER=fixed_c`.
 CINEMA_RENDERER ?= graphx
+# Packed4 assembly experiments (only used with fixed_asm). Keep the original
+# hardware-tested path by default. Physical benchmark binaries can select
+# dual, unrolled, or lut without editing production source.
+CINEMA_PACKED4_VARIANT ?= original
+CINEMA_SUBTITLE_CACHE ?= on
+ifeq ($(CINEMA_SUBTITLE_CACHE),off)
+CFLAGS += -DCINEMA_SUBTITLE_CACHE=0
+LTOFLAGS += -DCINEMA_SUBTITLE_CACHE=0
+else ifneq ($(CINEMA_SUBTITLE_CACHE),on)
+$(error Unknown CINEMA_SUBTITLE_CACHE '$(CINEMA_SUBTITLE_CACHE)' -- use on or off)
+endif
+ifeq ($(CINEMA_PACKED4_VARIANT),dual)
+CFLAGS += -DCINEMA_PACKED4_VARIANT=1
+LTOFLAGS += -DCINEMA_PACKED4_VARIANT=1
+else ifeq ($(CINEMA_PACKED4_VARIANT),unrolled)
+CFLAGS += -DCINEMA_PACKED4_VARIANT=2
+LTOFLAGS += -DCINEMA_PACKED4_VARIANT=2
+else ifeq ($(CINEMA_PACKED4_VARIANT),lut)
+CFLAGS += -DCINEMA_PACKED4_VARIANT=3
+LTOFLAGS += -DCINEMA_PACKED4_VARIANT=3
+else ifneq ($(CINEMA_PACKED4_VARIANT),original)
+$(error Unknown CINEMA_PACKED4_VARIANT '$(CINEMA_PACKED4_VARIANT)')
+endif
 CINEMA_BUILD ?= production
 ifeq ($(CINEMA_BUILD),diagnostic)
 CFLAGS += -DCINEMA_DIAGNOSTIC=1

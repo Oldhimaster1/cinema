@@ -17,12 +17,18 @@
 #define sk_Right   0x03
 #define sk_Up      0x04
 #define sk_Enter   0x09
+#define sk_Add     0x0A
+#define sk_Sub     0x0B
+#define sk_Mul     0x0C
+#define sk_Div     0x0D
 #define sk_Clear   0x0F
 #define sk_0       0x21
 #define sk_2nd     0x36
 #define sk_Mode    0x37
 #define sk_Del     0x38
 #define sk_Graph   0x31
+#define sk_Trace   0x32
+#define sk_Zoom    0x33
 #define sk_Window  0x34
 #define sk_Yequ    0x35
 

@@ -209,7 +209,8 @@ PALETTE_PROBE_SECONDS_CAP = None
 
 def stream_raw_frames(video_path: Path, fps_num: int, fps_den: int,
                        start: Optional[float], duration: Optional[float],
-                       max_frames: Optional[int] = None) -> Iterator[Image.Image]:
+                       max_frames: Optional[int] = None,
+                       fit_mode: str = "stretch") -> Iterator[Image.Image]:
     """Runs ffmpeg once, scaled+resampled to WIDTHxHEIGHT @ fps_num/fps_den,
     and yields decoded frames as they arrive over a single stdout pipe --
     no intermediate files, no PNG. Raises subprocess.CalledProcessError if
@@ -223,10 +224,19 @@ def stream_raw_frames(video_path: Path, fps_num: int, fps_den: int,
     if duration is not None:
         cmd += ["-t", str(duration)]
     cmd += ["-map", "0:v:0", "-an", "-sn", "-dn"]
+    if fit_mode == "stretch":
+        scale_filter = f"scale={WIDTH}:{HEIGHT}:flags=lanczos"
+    elif fit_mode == "contain":
+        scale_filter = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:"
+                        f"flags=lanczos,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:black")
+    elif fit_mode == "cover":
+        scale_filter = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:"
+                        f"flags=lanczos,crop={WIDTH}:{HEIGHT}")
+    else:
+        raise ValueError(f"unknown fit mode: {fit_mode}")
     cmd += [
         "-vf",
-        f"fps={fps_num}/{fps_den}:round=near:eof_action=pass,"
-        f"scale={WIDTH}:{HEIGHT}:flags=lanczos",
+        f"fps={fps_num}/{fps_den}:round=near:eof_action=pass,{scale_filter}",
     ]
     if max_frames is not None:
         cmd += ["-frames:v", str(max_frames)]
@@ -330,6 +340,68 @@ def build_global_palette(frames: Sequence[Image.Image], sample_count: int) -> Im
     return _palette_image_from_rgb1555(entries)
 
 
+def refine_palette_weighted(frames: Sequence[Image.Image], initial: Image.Image,
+                            iterations: int = 4) -> Image.Image:
+    """Try a deterministic, display-precision, green-weighted palette refinement.
+
+    Evaluate *actual* Pillow palette mapping against a bounded sample, and
+    retain the initial palette when refinement does not improve its weighted
+    RGB error. This is deliberately opt-in: default encodes stay bit-identical.
+    """
+    if not frames:
+        raise ValueError("cannot refine an empty palette sample")
+    # A representative bounded sample keeps long-video memory and CPU use
+    # independent of the number of palette frames. Select uniformly across
+    # all frames, not only the beginning of the sampled movie.
+    rows = min(len(frames), 32)
+    selected_frames = [frames[i * len(frames) // rows].convert("RGB") for i in range(rows)]
+    sample_width = 32
+    sample_height = 16
+    sample = Image.new("RGB", (sample_width, sample_height * rows))
+    for i, frame_image in enumerate(selected_frames):
+        sample.paste(frame_image.resize(
+            (sample_width, sample_height), Image.Resampling.BOX),
+            (0, i * sample_height))
+    pixels = list(sample.get_flattened_data())
+    initial_entries = palette_image_to_rgb1555(initial)
+    centers = [list(rgb1555_to_rgb888(v)) for v in initial_entries]
+
+    def error_for(candidate: Image.Image) -> int:
+        palette = [rgb1555_to_rgb888(v) for v in palette_image_to_rgb1555(candidate)]
+        error = 0
+        # Evaluate at actual 160x96 output resolution; the reduced k-means
+        # training image alone can mis-rank palettes for sharp edges/text.
+        for full_image in selected_frames:
+            mapped = full_image.quantize(palette=candidate,
+                                         dither=Image.Dither.NONE).tobytes()
+            for (r, g, b), idx in zip(full_image.get_flattened_data(), mapped):
+                cr, cg, cb = palette[min(idx, PALETTE_ENTRIES - 1)]
+                error += 2 * (r - cr) ** 2 + 4 * (g - cg) ** 2 + (b - cb) ** 2
+        return error
+
+    baseline_error = error_for(initial)
+    for _ in range(max(0, iterations)):
+        totals = [[0, 0, 0, 0] for _ in range(PALETTE_ENTRIES)]
+        for r, g, b in pixels:
+            nearest = min(range(PALETTE_ENTRIES),
+                          key=lambda i: (2 * (r - centers[i][0]) ** 2
+                                         + 4 * (g - centers[i][1]) ** 2
+                                         + (b - centers[i][2]) ** 2))
+            totals[nearest][0] += r
+            totals[nearest][1] += g
+            totals[nearest][2] += b
+            totals[nearest][3] += 1
+        for i, (red, green, blue, count) in enumerate(totals):
+            if count:
+                snapped = rgb888_to_rgb1555(round(red / count),
+                                            round(green / count), round(blue / count))
+                centers[i] = list(rgb1555_to_rgb888(snapped))
+
+    candidate_entries = [rgb888_to_rgb1555(*c) for c in centers]
+    candidate = _palette_image_from_rgb1555(candidate_entries)
+    return candidate if error_for(candidate) < baseline_error else initial
+
+
 def palette_image_to_rgb1555(palette_image: Image.Image) -> List[int]:
     raw = palette_image.getpalette()
     if raw is None:
@@ -353,6 +425,25 @@ def quantize_frame(image: Image.Image, palette_image: Image.Image,
     if dither_mode == "legacy":
         dither = Image.Dither.FLOYDSTEINBERG
     elif dither_mode == "clean":
+        dither = Image.Dither.NONE
+    elif dither_mode == "stable":
+        # Screen-space Bayer pattern: deterministic even with multiple
+        # workers, unlike a frame-to-frame error-feedback accumulator.
+        # Apply subtle fixed perturbations before nearest-palette mapping.
+        bayer = (0, 8, 2, 10, 12, 4, 14, 6,
+                 3, 11, 1, 9, 15, 7, 13, 5)
+        offsets = [int((n - 7.5) * 2) for n in bayer]
+        tables = [bytes(max(0, min(255, c + offset)) for c in range(256))
+                  for offset in offsets]
+        raw = bytearray(rgb.tobytes())
+        for y in range(HEIGHT):
+            for x in range(WIDTH):
+                table = tables[(y & 3) * 4 + (x & 3)]
+                at = (y * WIDTH + x) * 3
+                raw[at] = table[raw[at]]
+                raw[at + 1] = table[raw[at + 1]]
+                raw[at + 2] = table[raw[at + 2]]
+        rgb = Image.frombytes("RGB", (WIDTH, HEIGHT), bytes(raw))
         dither = Image.Dither.NONE
     else:
         raise ValueError(f"unknown dither mode: {dither_mode}")
@@ -409,7 +500,8 @@ def _palette_image_to_png_bytes(palette_image: Image.Image) -> bytes:
 def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
            palette_samples: int, start: Optional[float], duration: Optional[float],
            jobs: Optional[int] = None, dither_mode: str = "clean",
-           packed4: bool = False) -> int:
+           packed4: bool = False, fit_mode: str = "stretch",
+           palette_method: str = "median") -> int:
     """Returns the number of frames written. Writes to
     output_path.with_name(output_path.name + ".partial") first and only
     renames it to output_path after a self-check confirms the header and
@@ -451,11 +543,19 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
         sample_fps_num = max(1, round(palette_samples * 1000))
         sample_fps_den = max(1, round(probe_span * 1000))
 
+        # Preserve the legacy call signature when using the legacy default:
+        # external wrappers and tests may replace stream_raw_frames with a
+        # function that predates the new optional fit_mode keyword.
+        fit_kwargs = {"fit_mode": fit_mode} if fit_mode != "stretch" else {}
         sample_frames = list(stream_raw_frames(
             video_path, sample_fps_num, sample_fps_den, start, probe_span,
-            max_frames=palette_samples,
+            max_frames=palette_samples, **fit_kwargs,
         ))
         palette_image = build_global_palette(sample_frames, palette_samples)
+        if palette_method == "weighted":
+            palette_image = refine_palette_weighted(sample_frames, palette_image)
+        elif palette_method != "median":
+            raise ValueError(f"unknown palette method: {palette_method}")
         palette = palette_image_to_rgb1555(palette_image)
         del sample_frames  # bounded (<= palette_samples), but no reason to hold it longer
 
@@ -471,7 +571,8 @@ def encode(video_path: Path, output_path: Path, fps_num: int, fps_den: int,
             out.write(placeholder_header)  # patched with the real frame_count below
 
             raw_frames = (img.tobytes() for img in
-                          stream_raw_frames(video_path, fps_num, fps_den, start, duration))
+                          stream_raw_frames(video_path, fps_num, fps_den, start, duration,
+                                            **fit_kwargs))
 
             if jobs == 1:
                 for raw in raw_frames:
@@ -594,12 +695,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--palette-samples", type=int, default=0,
                          help="frames sampled for the global palette; 0 selects "
                               "32/64/128/256 automatically by duration (default: 0)")
-    parser.add_argument("--dither", choices=("clean", "legacy"), default="clean",
-                         help="clean removes error-diffusion speckles; legacy keeps "
-                              "the previous Floyd-Steinberg output (default: clean)")
+    parser.add_argument("--dither", choices=("clean", "legacy", "stable"), default="clean",
+                         help="clean uses nearest colors; legacy uses Floyd-Steinberg; "
+                              "stable uses a fixed spatial Bayer pattern (default: clean)")
+    parser.add_argument("--palette-method", choices=("median", "weighted"), default="median",
+                        help="weighted optionally refines 16-color selection using a bounded "
+                             "green-sensitive error metric (default: median)")
     parser.add_argument("--packed4", action="store_true",
                         help="store two 4-bit pixels per byte (half the RAW8 movie size); "
                              "requires a Cinema build with the fixed_asm renderer")
+    parser.add_argument("--fit", choices=("stretch", "contain", "cover"), default="stretch",
+                        help="aspect ratio: stretch is legacy output; contain adds black bars; "
+                             "cover fills by cropping (default: stretch)")
     parser.add_argument("--start", type=float, default=None, help="start offset in seconds")
     parser.add_argument("--duration", type=float, default=None, help="duration in seconds")
     parser.add_argument("--jobs", type=int, default=None,
@@ -624,10 +731,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("--subtitles and --subtitle-output require a single input video")
         return batch_encode(args.video, args.output, args.batch_ext, fps_num, fps_den,
                              args.palette_samples, args.start, args.duration, args.jobs,
-                             args.dither, args.packed4)
+                             args.dither, args.packed4, args.fit, args.palette_method)
 
     frame_count = encode(args.video, args.output, fps_num, fps_den, args.palette_samples,
-                         args.start, args.duration, args.jobs, args.dither, args.packed4)
+                         args.start, args.duration, args.jobs, args.dither, args.packed4,
+                         args.fit, args.palette_method)
     if args.subtitles is not None:
         from srt_to_csu import convert as convert_subtitles
         subtitle_output = args.subtitle_output or args.output.with_suffix(".csu")
@@ -640,7 +748,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int, fps_den: int,
                   palette_samples: int, start: Optional[float], duration: Optional[float],
                   jobs: Optional[int], dither_mode: str = "clean",
-                  packed4: bool = False) -> int:
+                  packed4: bool = False, fit_mode: str = "stretch",
+                  palette_method: str = "median") -> int:
     """Encodes every video file directly inside video_dir (not
     recursive) whose extension matches ext_list into output_dir, one
     .bin per input with the same basename. A single failing file (a
@@ -671,7 +780,7 @@ def batch_encode(video_dir: Path, output_dir: Path, ext_list: str, fps_num: int,
         print(f"--- {video_path.name} -> {out_path.name} ---")
         try:
             encode(video_path, out_path, fps_num, fps_den, palette_samples,
-                   start, duration, jobs, dither_mode, packed4)
+                   start, duration, jobs, dither_mode, packed4, fit_mode, palette_method)
             succeeded.append(video_path.name)
         except Exception as exc:  # noqa: BLE001 -- one bad file must not sink the batch
             print(f"FAILED: {video_path.name}: {exc}", file=sys.stderr)

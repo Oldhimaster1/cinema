@@ -57,6 +57,7 @@
  * user via Clear, false on a fatal error (already reported via putstr).
  */
 void player_v2_set_packed_extra_storage(uint8_t *storage, uint32_t size);
+void player_v2_set_performance_monitor(bool enabled);
 
 typedef enum { PLAYER_V2_COMPLETED=0, PLAYER_V2_USER_EXIT, PLAYER_V2_PREFILL_FAILED, PLAYER_V2_READ_FAILED, PLAYER_V2_DISCONNECTED, PLAYER_V2_INVALID } player_v2_result_t;
 player_v2_result_t player_v2_last_result(void);

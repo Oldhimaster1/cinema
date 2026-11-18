@@ -5,6 +5,7 @@ player_v2_result_t player_v2_last_result(void){return g_player_v2_result;}
 #include "msd_util.h"
 #include "render_v2.h"
 #include "cinema_subtitle.h"
+#include "palette_adjust.h"
 
 #include <fileioc.h>
 #include <graphx.h>
@@ -143,6 +144,7 @@ typedef struct player_v2_t {
 
     uint32_t fps_num;
     uint32_t fps_den;
+    uint16_t speed_percent; /* 50, 75, 100, 125, 150, or 200 */
     uint8_t format_flags;
     uint8_t frame_sectors;
 
@@ -165,11 +167,15 @@ typedef struct player_v2_t {
 
     /* --- OSD / controls --- */
     bool osd_pinned;          /* toggled on with [mode], stays until toggled off */
+    bool performance_monitor; /* opt-in persistent overlay, user settings */
     clock_t osd_until_tick;   /* transient show-after-keypress deadline */
     bool osd_was_visible;     /* was the OSD drawn on the previous frame? */
     uint8_t osd_clear_pending; /* frames left to scrub the OSD out of both buffers */
     uint8_t osd_fg;           /* brightest palette index, chosen at startup */
     uint8_t osd_bg;           /* darkest palette index */
+    uint16_t original_palette[16];
+    int8_t brightness;        /* -8..8 five-bit color levels */
+    uint8_t contrast;         /* 50..150 percent */
 
     /* --- telemetry, reported on exit and in the OSD --- */
     uint32_t decode_ticks_total;
@@ -593,8 +599,8 @@ static frame_slot_t *find_ready_frame(player_v2_t *player, uint32_t wanted)
 static uint32_t desired_frame(const player_v2_t *player, clock_t now)
 {
     clock_t elapsed = now - player->start_tick - player->accumulated_pause_ticks;
-    uint64_t numerator = (uint64_t)elapsed * player->fps_num;
-    uint64_t denominator = (uint64_t)CLOCKS_PER_SEC * player->fps_den;
+    uint64_t numerator = (uint64_t)elapsed * player->fps_num * player->speed_percent;
+    uint64_t denominator = (uint64_t)CLOCKS_PER_SEC * player->fps_den * 100u;
     uint64_t frame = (uint64_t)player->start_frame + numerator / denominator;
 
     if (frame > 0xFFFFFFFFu) {
@@ -648,7 +654,7 @@ static bool osd_should_draw(const player_v2_t *player)
 {
     /* Signed difference so the comparison stays correct across a clock_t
      * wraparound: negative means "now is still before the deadline". */
-    return player->osd_pinned
+    return player->performance_monitor || player->osd_pinned
         || (int32_t)((uint32_t)clock() - (uint32_t)player->osd_until_tick) < 0;
 }
 
@@ -712,22 +718,26 @@ static void draw_osd(player_v2_t *player)
     format_timecode(total, player->frame_count, player->fps_num, player->fps_den);
 
     if (player->paused) {
-        sprintf(line, "PAUSED  %s/%s%s  B%u", position, total,
-                player->loop_enabled ? "  LOOP" : "",
-                (unsigned)boot_GetBatteryStatus());
-    } else {
+        sprintf(line, "PAUSE %s/%s %u%% B%+d C%u", position, total,
+                (unsigned)player->speed_percent, (int)player->brightness,
+                (unsigned)player->contrast);
+    } else if (player->performance_monitor) {
         uint32_t decode_ms = player->decode_samples
             ? (uint32_t)(((uint64_t)player->decode_ticks_total * 1000u)
                           / ((uint64_t)player->decode_samples * CLOCKS_PER_SEC))
             : 0u;
 
-        sprintf(line, "%s/%s  %lu.%luFPS  DEC%lums  DR%lu%s  B%u",
-                position, total,
+        sprintf(line, "F%lu.%lu D%lums DR%lu %u%% B%+d C%u",
                 (unsigned long)(player->fps_tenths / 10u),
                 (unsigned long)(player->fps_tenths % 10u),
                 (unsigned long)decode_ms,
                 (unsigned long)player->dropped_frames,
-                player->loop_enabled ? "  LOOP" : "",
+                (unsigned)player->speed_percent,
+                (int)player->brightness, (unsigned)player->contrast);
+    } else {
+        sprintf(line, "%s/%s %u%% %s BAT%u", position, total,
+                (unsigned)player->speed_percent,
+                player->loop_enabled ? "LOOP" : "",
                 (unsigned)boot_GetBatteryStatus());
     }
 
@@ -1056,26 +1066,106 @@ static bool subtitle_locate(player_v2_t *player,uint32_t frame)
 #define SUB_STYLE_BOX 0u
 #define SUB_STYLE_COMPACT 1u
 #define SUB_STYLE_TEXT 2u
+#define SUB_STYLE_OUTLINE 3u
 #define SUB_SIZE_NORMAL 0u
 #define SUB_SIZE_TIGHT 1u
 #define SUB_POS_BOTTOM 0u
 #define SUB_POS_TOP 1u
+#ifndef CINEMA_SUBTITLE_CACHE
+#define CINEMA_SUBTITLE_CACHE 1
+#endif
 
-static uint32_t subtitle_adjusted_frame(const player_v2_t *player,uint32_t frame)
+#if CINEMA_SUBTITLE_CACHE
+/* Compact text bitmap cache: 30 characters * 8 rows * 2 lines = 480 B.
+ * 8-bit sprites would need about 4.8 KiB, which exceeds the calculator's
+ * BSS/heap ceiling alongside three full USB slot buffers. A bitmask keeps
+ * all three slots and avoids re-rasterizing GraphX glyphs on every frame. */
+#define SUB_CACHE_TRANSPARENT 16u
+static uint8_t g_sub_cached_masks[2][CSU_LINE_MAX][8];
+static int32_t g_sub_cached_index = -1;
+static uint8_t g_sub_cached_style = 255;
+static uint8_t g_sub_cached_fg, g_sub_cached_bg;
+
+static void subtitle_build_cached_line(uint8_t index, const char *text, uint8_t fg)
 {
-    int64_t delta=(int64_t)player->subtitle_delay_ms*player->fps_num;
-    int64_t divisor=(int64_t)1000*player->fps_den;
-    int64_t adjusted;
-    if(delta>=0)delta=(delta+divisor/2)/divisor;
-    else delta=-((-delta+divisor/2)/divisor);
-    /* Positive delay means show text later, so inspect an earlier subtitle time. */
-    adjusted=(int64_t)frame-delta;
-    if(adjusted<0)return 0;
-    if(adjusted>=(int64_t)player->frame_count)return player->frame_count-1;
-    return (uint32_t)adjusted;
+    uint8_t length = (uint8_t)strlen(text);
+    uint8_t y, x, i;
+    memset(g_sub_cached_masks[index], 0, sizeof(g_sub_cached_masks[index]));
+    gfx_SetTextFGColor(fg);
+    gfx_SetTextBGColor(SUB_CACHE_TRANSPARENT);
+    for (i = 0; i < length; ++i) {
+        const gfx_sprite_t *glyph = gfx_GetSpriteChar(text[i]);
+        if (!glyph) continue;
+        for (y = 0; y < 8; ++y) {
+            uint8_t mask = 0;
+            for (x = 0; x < 8; ++x) {
+                if (glyph->data[(uint16_t)y * 8u + x] == fg)
+                    mask |= (uint8_t)(0x80u >> x);
+            }
+            g_sub_cached_masks[index][i][y] = mask;
+        }
+    }
 }
 
-static void draw_centered_subtitle_line(player_v2_t *player,const char *text,uint8_t y)
+static void subtitle_draw_cached_line(uint8_t index, uint8_t length,
+                                      uint16_t x, uint8_t y,
+                                      uint8_t fg, uint8_t bg, uint8_t style)
+{
+    uint8_t *buffer = (uint8_t *)gfx_vbuffer;
+    uint8_t i, row, col, pass;
+    /* Background first (one-pixel shadow or 4-neighbor outline), then
+     * foreground. Both reuse the same cached glyph masks. */
+    for (pass = style == SUB_STYLE_TEXT || style == SUB_STYLE_OUTLINE ? 0u : 1u;
+         pass < 2u; ++pass) {
+        uint8_t color = pass == 0u ? bg : fg;
+        for (i = 0; i < length; ++i) {
+            for (row = 0; row < 8u; ++row) {
+                uint8_t bits = g_sub_cached_masks[index][i][row];
+                uint8_t *target = buffer + ((uint24_t)y + row) * GFX_LCD_WIDTH
+                                + x + (uint24_t)i * 8u;
+                for (col = 0; col < 8u; ++col) {
+                    if (bits & 0x80u) {
+                        if (pass == 1u) target[col] = color;
+                        else if (style == SUB_STYLE_TEXT)
+                            target[col + GFX_LCD_WIDTH + 1] = color;
+                        else {
+                            target[col - 1] = color;
+                            target[col + 1] = color;
+                            target[col - GFX_LCD_WIDTH] = color;
+                            target[col + GFX_LCD_WIDTH] = color;
+                        }
+                    }
+                    bits <<= 1;
+                }
+            }
+        }
+    }
+}
+
+static void subtitle_update_cache(player_v2_t *player)
+{
+    uint8_t prev_fg, prev_bg;
+    if (g_sub_cached_index == player->subtitle_cue_index
+        && g_sub_cached_style == player->subtitle_style
+        && g_sub_cached_fg == player->osd_fg
+        && g_sub_cached_bg == player->osd_bg) return;
+    prev_fg = gfx_SetTextFGColor(player->osd_fg);
+    prev_bg = gfx_SetTextBGColor(SUB_CACHE_TRANSPARENT);
+    subtitle_build_cached_line(0, player->subtitle_cue.line1, player->osd_fg);
+    subtitle_build_cached_line(1, player->subtitle_cue.line2, player->osd_fg);
+    gfx_SetTextFGColor(prev_fg);
+    gfx_SetTextBGColor(prev_bg);
+    g_sub_cached_index = player->subtitle_cue_index;
+    g_sub_cached_style = player->subtitle_style;
+    g_sub_cached_fg = player->osd_fg;
+    g_sub_cached_bg = player->osd_bg;
+}
+
+/* Keep the original GraphX text path available for real-device A/B checks:
+ * sprite-cache speed/visual appearance has not yet been physically proven. */
+#endif /* CINEMA_SUBTITLE_CACHE */
+static void draw_centered_subtitle_line(player_v2_t *player,const char *text,
+                                       uint8_t line_index,uint8_t y)
 {
     uint24_t width=(uint24_t)strlen(text)*8u;
     uint24_t x=width<GFX_LCD_WIDTH?(GFX_LCD_WIDTH-width)/2:0;
@@ -1083,16 +1173,29 @@ static void draw_centered_subtitle_line(player_v2_t *player,const char *text,uin
     uint24_t box_x=x>pad?x-pad:0;
     uint24_t box_w=width+2u*pad;
     if(box_w>GFX_LCD_WIDTH)box_w=GFX_LCD_WIDTH;
-    if(player->subtitle_style!=SUB_STYLE_TEXT){
+    if(player->subtitle_style!=SUB_STYLE_TEXT && player->subtitle_style!=SUB_STYLE_OUTLINE){
         gfx_SetColor(player->osd_bg);
         gfx_FillRectangle_NoClip(box_x,y>pad?y-pad:0,box_w,8u+2u*pad);
-    }else{
-        /* One cheap shadow draw gives legibility without a full box. */
+    }
+#if CINEMA_SUBTITLE_CACHE
+    subtitle_draw_cached_line(line_index, (uint8_t)strlen(text), (uint16_t)x, y,
+                              player->osd_fg, player->osd_bg, player->subtitle_style);
+#else
+    (void)line_index;
+    if(player->subtitle_style==SUB_STYLE_TEXT || player->subtitle_style==SUB_STYLE_OUTLINE){
         gfx_SetTextFGColor(player->osd_bg);
-        gfx_PrintStringXY(text,x+1u,y+1u);
+        if(player->subtitle_style==SUB_STYLE_TEXT)
+            gfx_PrintStringXY(text,x+1u,y+1u);
+        else{
+            gfx_PrintStringXY(text,x-1u,y);
+            gfx_PrintStringXY(text,x+1u,y);
+            gfx_PrintStringXY(text,x,y-1u);
+            gfx_PrintStringXY(text,x,y+1u);
+        }
     }
     gfx_SetTextFGColor(player->osd_fg);
     gfx_PrintStringXY(text,x,y);
+#endif
 }
 
 static void draw_subtitle(player_v2_t *player,uint32_t frame)
@@ -1104,9 +1207,13 @@ static void draw_subtitle(player_v2_t *player,uint32_t frame)
     uint32_t lookup;
     uint8_t y1,y2;
     if(!player->subtitle_available||!player->subtitles_enabled)return;
-    lookup=subtitle_adjusted_frame(player,frame);
+    if(!csu_adjust_frame(&lookup,frame,player->frame_count,player->fps_num,
+                         player->fps_den,player->subtitle_delay_ms))return;
     if(!subtitle_locate(player,lookup))return;
     cue=&player->subtitle_cue;
+#if CINEMA_SUBTITLE_CACHE
+    subtitle_update_cache(player);
+#endif
     if(player->subtitle_position==SUB_POS_TOP){y1=V2_Y_OFFSET+4u;y2=V2_Y_OFFSET+14u;}
     else {y1=V2_Y_OFFSET+CINEMA_V2_DEST_HEIGHT-22u;y2=V2_Y_OFFSET+CINEMA_V2_DEST_HEIGHT-12u;}
     if(player->subtitle_size_mode==SUB_SIZE_TIGHT){if(player->subtitle_position==SUB_POS_TOP)y2=y1+9u;else y1=y2-9u;}
@@ -1114,13 +1221,13 @@ static void draw_subtitle(player_v2_t *player,uint32_t frame)
 #ifdef CINEMA_DIAGNOSTIC
         g_subtitle_active_frames++;
 #endif
-        draw_centered_subtitle_line(player,cue->line1,y1);
-        draw_centered_subtitle_line(player,cue->line2,y2);
-    }else draw_centered_subtitle_line(player,cue->line1,y2);
+        draw_centered_subtitle_line(player,cue->line1,0u,y1);
+        draw_centered_subtitle_line(player,cue->line2,1u,y2);
+    }else draw_centered_subtitle_line(player,cue->line1,0u,y2);
 }
 
 static const char *subtitle_style_name(uint8_t v)
-{return v==SUB_STYLE_COMPACT?"COMPACT":v==SUB_STYLE_TEXT?"TEXT":"BOX";}
+{return v==SUB_STYLE_COMPACT?"COMPACT":v==SUB_STYLE_TEXT?"TEXT":v==SUB_STYLE_OUTLINE?"OUTLINE":"BOX";}
 static const char *subtitle_spacing_name(uint8_t v)
 {return v==SUB_SIZE_TIGHT?"TIGHT":"NORMAL";}
 static const char *subtitle_position_name(uint8_t v)
@@ -1135,7 +1242,7 @@ static void subtitle_options_draw(player_v2_t *player,uint8_t row)
     snprintf(line,sizeof(line),"%c Style: %s",row==1?'>':' ',subtitle_style_name(player->subtitle_style));gfx_PrintStringXY(line,8,44);
     snprintf(line,sizeof(line),"%c Spacing: %s",row==2?'>':' ',subtitle_spacing_name(player->subtitle_size_mode));gfx_PrintStringXY(line,8,58);
     snprintf(line,sizeof(line),"%c Position: %s",row==3?'>':' ',subtitle_position_name(player->subtitle_position));gfx_PrintStringXY(line,8,72);
-    gfx_PrintStringXY("Up/Down select",8,96);gfx_PrintStringXY("Left/Right change",8,108);
+    gfx_PrintStringXY("Up/Down select",8,96);gfx_PrintStringXY("Left/Right 25ms delay",8,108);
     gfx_PrintStringXY("0 reset  Del exit",8,120);
     gfx_PrintStringXY("Y= toggles subtitles",8,136);
     gfx_PrintStringXY("2nd pauses  Clear exits",8,148);
@@ -1155,8 +1262,8 @@ static void subtitle_options_menu(player_v2_t *player)
         else if(key==sk_0){player->subtitle_delay_ms=0;player->subtitle_style=SUB_STYLE_BOX;player->subtitle_size_mode=SUB_SIZE_NORMAL;player->subtitle_position=SUB_POS_BOTTOM;changed=true;}
         else if(key==sk_Left||key==sk_Right){
             int dir=key==sk_Right?1:-1;
-            if(row==0){player->subtitle_delay_ms+=dir*100;if(player->subtitle_delay_ms>10000)player->subtitle_delay_ms=10000;if(player->subtitle_delay_ms< -10000)player->subtitle_delay_ms=-10000;}
-            else if(row==1)player->subtitle_style=(uint8_t)((player->subtitle_style+3u+dir)%3u);
+            if(row==0){player->subtitle_delay_ms+=dir*25;if(player->subtitle_delay_ms>10000)player->subtitle_delay_ms=10000;if(player->subtitle_delay_ms< -10000)player->subtitle_delay_ms=-10000;}
+            else if(row==1)player->subtitle_style=(uint8_t)((player->subtitle_style+4u+dir)%4u);
             else if(row==2)player->subtitle_size_mode^=1u;
             else player->subtitle_position^=1u;
             changed=true;
@@ -1194,10 +1301,19 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
 #if CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
     render_scaled_fixed_c(slot_sprite(slot)->data);
 #elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
-    if (player->format_flags & CIN2_FLAG_PACKED4)
-        render_scaled_packed4_asm(slot_sprite(slot)->data
-            + (uint32_t)slot->present_index * CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT / 2u);
-    else
+    if (player->format_flags & CIN2_FLAG_PACKED4) {
+        const uint8_t *packed = slot_sprite(slot)->data
+            + (uint32_t)slot->present_index * CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT / 2u;
+#if CINEMA_PACKED4_VARIANT == 1
+        render_scaled_packed4_dual_asm(packed);
+#elif CINEMA_PACKED4_VARIANT == 2
+        render_scaled_packed4_unrolled_asm(packed);
+#elif CINEMA_PACKED4_VARIANT == 3
+        render_scaled_packed4_lut_asm(packed);
+#else
+        render_scaled_packed4_asm(packed);
+#endif
+    } else
         render_scaled_fixed_asm(slot_sprite(slot)->data);
 #else
     render_scaled_graphx((const struct gfx_sprite_t *)slot_sprite(slot));
@@ -1613,6 +1729,38 @@ static bool playback_finished(const player_v2_t *player)
         && player->last_frame_presented + 1 >= player->frame_count;
 }
 
+/* Re-anchor the clock at the already-presented picture when speed changes.
+ * This avoids time jumps, avoids altering the requested seek position, and
+ * keeps queued USB transfers alive. The buffer may include later frames,
+ * but its ordering is unchanged by this adjustment. */
+static void player_adjust_speed(player_v2_t *player, int direction)
+{
+    static const uint16_t speeds[] = {50u, 75u, 100u, 125u, 150u, 200u};
+    uint8_t i;
+    for (i = 0; i < sizeof(speeds) / sizeof(speeds[0]); ++i)
+        if (player->speed_percent == speeds[i]) break;
+    if (i == sizeof(speeds) / sizeof(speeds[0])) i = 2;
+    if (direction > 0 && i + 1u < sizeof(speeds) / sizeof(speeds[0])) i++;
+    if (direction < 0 && i > 0) i--;
+    if (player->speed_percent == speeds[i]) return;
+    player->speed_percent = speeds[i];
+    player->start_frame = player->has_presented ? player->last_frame_presented + 1u
+                                                 : player->start_frame;
+    player->start_tick = clock();
+    player->accumulated_pause_ticks = 0;
+    if (player->paused) player->pause_tick = player->start_tick;
+}
+
+static void player_apply_color_controls(player_v2_t *player)
+{
+    uint16_t palette[16];
+    cinema_adjust_palette(palette, player->original_palette, 16u,
+                          player->brightness, player->contrast);
+    /* GraphX palette updates recolor already-displayed pixels instantly;
+     * there is no frame re-render or USB read on a brightness keypress. */
+    gfx_SetPalette(palette, sizeof(palette), 0);
+}
+
 static bool player_v2_loop(player_v2_t *player)
 {
     while (true) {
@@ -1701,6 +1849,30 @@ static bool player_v2_loop(player_v2_t *player)
 
             case sk_Graph:
                 player->loop_enabled = !player->loop_enabled;
+                break;
+
+            case sk_Zoom:  /* speed down  200 -> 150 -> ... -> 50% */
+                player_adjust_speed(player, -1);
+                break;
+            case sk_Trace: /* speed up  50 -> 75 -> ... -> 200% */
+                player_adjust_speed(player, +1);
+                break;
+
+            case sk_Add: /* increase LCD palette brightness */
+                if (player->brightness < 8) player->brightness++;
+                player_apply_color_controls(player);
+                break;
+            case sk_Sub:
+                if (player->brightness > -8) player->brightness--;
+                player_apply_color_controls(player);
+                break;
+            case sk_Mul: /* increase contrast, no video decode cost */
+                if (player->contrast < 150) player->contrast += 10;
+                player_apply_color_controls(player);
+                break;
+            case sk_Div:
+                if (player->contrast > 50) player->contrast -= 10;
+                player_apply_color_controls(player);
                 break;
 
             case sk_Del:
@@ -1865,6 +2037,11 @@ static bool player_v2_loop(player_v2_t *player)
 }
 
 static const fat32ro_extent_map_t *g_next_subtitle_map;
+static bool g_next_performance_monitor;
+void player_v2_set_performance_monitor(bool enabled)
+{
+    g_next_performance_monitor = enabled;
+}
 static uint32_t g_next_subtitle_size,g_next_subtitle_movie_id;
 static bool g_next_subtitles_enabled;
 static uint8_t *g_next_subtitle_sector;
@@ -1924,9 +2101,17 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.frame_count = header->frame_count;
     player.fps_num = header->fps_num;
     player.fps_den = header->fps_den;
+    player.speed_percent = 100u;
+    player.performance_monitor = g_next_performance_monitor;
+    player.brightness = 0;
+    player.contrast = 100u;
+    memcpy(player.original_palette, header->palette, sizeof(player.original_palette));
     player.format_flags = header->flags;
     player.frame_sectors = (uint8_t)cin2_frame_sectors(header->flags);
     player.subtitle_map=g_next_subtitle_map;player.subtitle_size=g_next_subtitle_size;
+#if CINEMA_SUBTITLE_CACHE
+    g_sub_cached_index=-1;
+#endif
     player.subtitle_sector=g_next_subtitle_sector;
     player.subtitle_movie_id=g_next_subtitle_movie_id;player.subtitles_enabled=g_next_subtitles_enabled;
     player.subtitle_cached_sector=0;player.subtitle_sector_valid=false;
@@ -1947,7 +2132,7 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
             os_ClrHome();
             putstr("Opening subtitles...");
             player.subtitle_available=csu_stream_open_fast(&player.subtitle_header,
-                subtitle_stream_read,&player,player.subtitle_size,0u,
+                subtitle_stream_read,&player,player.subtitle_size,player.subtitle_movie_id,
                 header->frame_count,header->fps_num,header->fps_den);
         }else{
             player.subtitle_available=false;

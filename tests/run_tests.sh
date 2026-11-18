@@ -58,7 +58,7 @@ test_csu_stream() {
 test_structural_link() {
     $CC $STUB_CFLAGS \
         src/main.c src/player_v1.c src/player_v2.c src/msd_util.c src/cin2.c \
-        src/fat32ro.c src/placement_map.c src/render_v2.c \
+        src/fat32ro.c src/placement_map.c src/render_v2.c src/palette_adjust.c \
         src/cinema_settings.c src/cinema_codec.c \
         src/cinema_subtitle.c \
         tests/stub_impl.c -o "$TMP/cinema_stub_link"
@@ -69,7 +69,7 @@ test_player_v2_sim() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
         src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c src/render_v2.c \
         src/cinema_subtitle.c \
-        src/cinema_codec.c \
+        src/cinema_codec.c src/palette_adjust.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim.c -o "$TMP/test_player_v2_sim"
     timeout 30 "$TMP/test_player_v2_sim"
 }
@@ -84,7 +84,7 @@ test_player_v2_sim_fixed_c_integration() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock -DCINEMA_RENDERER=CINEMA_RENDERER_FIXED_C \
         src/player_v2.c src/cin2.c src/msd_util.c src/fat32ro.c src/render_v2.c \
         src/cinema_subtitle.c \
-        src/cinema_codec.c \
+        src/cinema_codec.c src/palette_adjust.c \
         tests/stub_impl_sim.c tests/test_player_v2_sim_fixed_c_integration.c \
         -o "$TMP/test_player_v2_sim_fixed_c_integration"
     timeout 30 "$TMP/test_player_v2_sim_fixed_c_integration"
@@ -100,6 +100,15 @@ test_render_v2() {
     "$TMP/test_render_v2"
 }
 
+test_palette_adjust() {
+    $CC $CFLAGS -Isrc -o "$TMP/test_palette_adjust" tests/test_palette_adjust.c src/palette_adjust.c
+    "$TMP/test_palette_adjust"
+}
+test_settings() {
+    $CC $CFLAGS -Isrc -o "$TMP/test_settings" tests/test_settings.c src/cinema_settings.c src/cinema_codec.c
+    "$TMP/test_settings"
+}
+
 test_player_v1_sim() {
     $CC $STUB_CFLAGS \
         src/player_v1.c src/msd_util.c \
@@ -113,6 +122,8 @@ test_encoder() {
         return 0
     fi
     python3 -m pytest -q tests/test_cin2_format.py tests/test_encode_cin2.py \
+        tests/test_aspect_ratio.py tests/test_quality_modes.py \
+        tests/test_packed5_lab.py tests/test_converter_gui.py \
         tests/test_fixtures.py tests/test_frame_rate_boundaries.py \
         tests/test_fuzz_cin2_header.py tests/test_reliability_regressions.py \
         tests/test_csu.py tests/test_subtitle_authoring.py tests/test_scheduler_math.py
@@ -122,6 +133,8 @@ run_step "cin2.c host unit tests"                   test_cin2
 run_step "placement fast-map adapter tests"          test_placement_map
 run_step "fat32ro.c host unit tests"                test_fat32ro
 run_step "render_v2.c fixed-scale pixel correctness" test_render_v2
+run_step "full 32K RGB1555 palette adjustment domain" test_palette_adjust
+run_step "settings backward compatibility + CRC" test_settings
 run_step "streamed CSU larger than 64 KiB"           test_csu_stream
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim

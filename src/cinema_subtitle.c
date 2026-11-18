@@ -1,6 +1,40 @@
 #include "cinema_subtitle.h"
 #include "cinema_codec.h"
 #include <string.h>
+uint32_t csu_movie_id(const char *filename,uint32_t frames,uint32_t fps_num,
+                      uint32_t fps_den,uint32_t movie_file_size)
+{
+    uint8_t input[13u + 16u]; /* FAT32 short name plus four little-endian fields */
+    size_t n, i;
+    if(!filename)return 0;
+    n=strlen(filename);
+    if(n==0||n>12)return 0;
+    for(i=0;i<n;i++){
+        unsigned char c=(unsigned char)filename[i];
+        if(c>127u)c='?';
+        if(c>='a'&&c<='z')c=(unsigned char)(c-'a'+'A');
+        input[i]=c;
+    }
+    cinema_wr32(input+n,frames);
+    cinema_wr32(input+n+4u,fps_num);
+    cinema_wr32(input+n+8u,fps_den);
+    cinema_wr32(input+n+12u,movie_file_size);
+    return cinema_crc32_zeroed(input,n+16u,n+16u,0);
+}
+bool csu_adjust_frame(uint32_t *out,uint32_t frame,uint32_t total_frames,
+                      uint32_t fps_num,uint32_t fps_den,int32_t delay_ms)
+{
+    int64_t delta, divisor, adjusted;
+    if(!out||!total_frames||!fps_num||!fps_den)return false;
+    delta=(int64_t)delay_ms*fps_num;
+    divisor=(int64_t)1000*fps_den;
+    if(delta>=0)delta=(delta+divisor/2)/divisor;
+    else delta=-((-delta+divisor/2)/divisor);
+    adjusted=(int64_t)frame-delta;
+    if(adjusted<0||adjusted>=(int64_t)total_frames)return false;
+    *out=(uint32_t)adjusted;
+    return true;
+}
 bool csu_parse_header(csu_header_t*h,const uint8_t*b,size_t n){if(n<CSU_HEADER_SIZE||memcmp(b,"CSU1",4)||b[4]!=1||cinema_rd16(b+6)!=CSU_HEADER_SIZE||cinema_rd16(b+8)!=CSU_RECORD_SIZE)return false;h->cue_count=cinema_rd32(b+12);h->movie_id=cinema_rd32(b+16);h->frame_count=cinema_rd32(b+20);h->fps_num=cinema_rd32(b+24);h->fps_den=cinema_rd32(b+28);h->file_crc=cinema_rd32(b+32);return h->fps_num&&h->fps_den;}
 bool csu_parse_cue(csu_cue_t*c,const uint8_t*b,size_t n){if(n<CSU_RECORD_SIZE)return false;c->start_frame=cinema_rd32(b);c->end_frame=cinema_rd32(b+4);c->line_count=b[8];c->line1_len=b[9];c->line2_len=b[10];if(c->start_frame>=c->end_frame||c->line_count<1||c->line_count>2||c->line1_len>CSU_LINE_MAX||c->line2_len>CSU_LINE_MAX||(c->line_count==1&&c->line2_len))return false;memcpy(c->line1,b+12,c->line1_len);c->line1[c->line1_len]=0;memcpy(c->line2,b+42,c->line2_len);c->line2[c->line2_len]=0;return true;}
 bool csu_validate_file(const uint8_t*b,size_t n,uint32_t id,uint32_t frames,uint32_t fn,uint32_t fd){csu_header_t h;uint32_t i,prev=0;if(!csu_parse_header(&h,b,n)||h.movie_id!=id||h.frame_count!=frames||h.fps_num!=fn||h.fps_den!=fd||n!=CSU_HEADER_SIZE+(size_t)h.cue_count*CSU_RECORD_SIZE||h.file_crc!=cinema_crc32_zeroed(b,n,32,4))return false;for(i=0;i<h.cue_count;i++){csu_cue_t c;if(!csu_parse_cue(&c,b+CSU_HEADER_SIZE+(size_t)i*CSU_RECORD_SIZE,CSU_RECORD_SIZE)||c.end_frame>frames||(i&&c.start_frame<prev))return false;prev=c.end_frame;}return true;}

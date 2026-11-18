@@ -8,6 +8,7 @@
 #define CINEMA_SETTING_STATUS 2u
 #define CINEMA_SETTING_THUMBS 4u
 #define CINEMA_SETTING_REMEMBER 8u
+#define CINEMA_SETTING_PERF_MONITOR 16u
 typedef struct {uint8_t flags;} cinema_settings_t;
 void cinema_settings_defaults(cinema_settings_t *s);
 bool cinema_settings_decode(cinema_settings_t *s,const uint8_t *b,size_t n);

@@ -1,5 +1,12 @@
 # Cinema v0.9.0 Beta 1
 
+> **Experimental development:** A separate upgrade branch adds a desktop
+> converter GUI, aspect-ratio/quantization modes, subtitle caching and
+> runtime picture/performance controls. See
+> [the upgrade testing log](docs/UPGRADE_EXPERIMENTS.md) for precise
+> validation status. These changes are **not** the physically tested Beta 1
+> release described below.
+
 Cinema is a USB video player for the TI-84 Plus CE. It plays videos converted to the CIN2 format from compatible FAT32 USB storage.
 
 Beta 1 supports:
