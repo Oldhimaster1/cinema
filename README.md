@@ -7,6 +7,14 @@
 > validation status. These changes are **not** the physically tested Beta 1
 > release described below.
 
+> **One-install experimental test:** On this branch, `bin/CINEMA.8xp` is a
+> single auto-benchmarking build. It compares all Packed4 renderers on the
+> calculator, checks output equivalence, chooses a conservative fast path,
+> tests subtitle caching when a CSU file is present, and displays one final
+> summary screen. No seven-binary install or manual switching is needed.
+> Read [the auto-test instructions](docs/UPGRADE_EXPERIMENTS.md#recommended-one-install-automatic-test)
+> before trying it; real hardware confirmation is still pending.
+
 Cinema is a USB video player for the TI-84 Plus CE. It plays videos converted to the CIN2 format from compatible FAT32 USB storage.
 
 Beta 1 supports:

@@ -331,7 +331,17 @@ uint8_t os_GetCSC(void)
  * Normally defined once in src/main.c; this test links player_v2.c
  * directly without main.c, so it needs its own definition to satisfy
  * the linker (put_msd_error() and player_v2.c itself both call it). */
-void putstr(const char *str) { printf("[calc] %s\n", str); }
+#ifdef CINEMA_AUTO_TEST
+char g_auto_sub_status[100];
+#endif
+void putstr(const char *str)
+{
+#ifdef CINEMA_AUTO_TEST
+    if (strncmp(str, "SUB ", 4) == 0)
+        snprintf(g_auto_sub_status, sizeof(g_auto_sub_status), "%s", str);
+#endif
+    printf("[calc] %s\n", str);
+}
 
 /* --- graphx stub --------------------------------------------------- */
 
@@ -382,7 +392,26 @@ gfx_sprite_t *gfx_AllocSprite(uint8_t width, uint8_t height,
 void gfx_ScaledSprite_NoClip(const gfx_sprite_t *sprite, uint24_t x,
                               uint8_t y, uint8_t width_scale,
                               uint8_t height_scale)
-{ (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale; g_frames_rendered++; }
+{
+#ifdef CINEMA_AUTO_TEST
+    uint16_t source_y, source_x;
+    for (source_y = 0; source_y < sprite->height; ++source_y) {
+        for (source_x = 0; source_x < sprite->width; ++source_x) {
+            uint8_t v = sprite->data[(uint32_t)source_y * sprite->width + source_x];
+            uint16_t oy = (uint16_t)(y + source_y * height_scale);
+            uint16_t ox = (uint16_t)(x + source_x * width_scale);
+            uint8_t yy, xx;
+            for (yy = 0; yy < height_scale; ++yy)
+                for (xx = 0; xx < width_scale; ++xx)
+                    gfx_vram_stub[oy + yy][ox + xx] = v;
+        }
+    }
+    sim_advance_clock(110);
+#else
+    (void)sprite; (void)x; (void)y; (void)width_scale; (void)height_scale;
+#endif
+    g_frames_rendered++;
+}
 
 /* --- test accessors for the appvar store ------------------------------ */
 

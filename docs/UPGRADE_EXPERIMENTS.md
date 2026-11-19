@@ -47,6 +47,42 @@ leave Packed4 off unless the calculator is using a `fixed_asm` build.
 
 ## Renderer A/B builds
 
+### Recommended: one-install automatic test
+
+```sh
+make -B CINEMA_RENDERER=fixed_asm CINEMA_AUTO_TEST=on
+```
+
+This builds **one** `bin/CINEMA.8xp`. On opening a CIN2 movie, Cinema
+automatically benchmarks its *first prefetched movie frame* in the offscreen
+buffer, using one untimed warm-up and 16 timed renders per candidate. Packed4 compares the
+original eZ80 assembly against `dual`, `unrolled`, and `lut`. RAW8 compares
+GraphX against fixed-C and fixed-ASM. Each alternative must yield an identical
+hash across the **entire 320×240 framebuffer** before it can be chosen; the
+winner must also be at least 7% faster than the current valid winner.
+Uncertain/tied timings or any mismatched pixels automatically retain the
+original. No benchmark frame is ever shown and movie playback begins **after**
+the benchmark, so startup overhead does not count toward reported playback
+FPS. Selection occurs afresh for each opened movie and requires no settings.
+
+If a matching `.csu` file is loaded, the same build also compares cached
+subtitle glyphs with the legacy GraphX path for two lines of text in each of
+the four subtitle styles. It enables caching only if all four styles render
+identically **and** cached drawing is at least 7% faster. Any mismatch uses
+legacy text rendering automatically. This is a conservative pixel-equivalence
+check on a synthetic two-line sample, not proof every real caption or special
+character is correct. The automatic test finishes with **one summary screen**
+showing timing ticks, `OK`/`DIFF`, selected renderer, subtitle-cache status,
+measured playback FPS and dropped frames. One key dismisses the summary.
+
+**Important:** A successful CEdev build and host simulation cannot establish
+which candidate really wins on a TI-84 Plus CE, and the checksum cannot prove
+LCD color accuracy or catch writes outside the framebuffer. The calculator's
+automatic result is the hardware measurement; please share a photo of its
+summary screen after playing a representative Packed4 movie *with subtitles*.
+
+### Manual comparisons (optional, not required)
+
 ```sh
 make -B CINEMA_RENDERER=fixed_asm CINEMA_PACKED4_VARIANT=original CINEMA_BUILD=diagnostic
 make -B CINEMA_RENDERER=fixed_asm CINEMA_PACKED4_VARIANT=dual CINEMA_BUILD=diagnostic

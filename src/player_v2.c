@@ -6,6 +6,7 @@ player_v2_result_t player_v2_last_result(void){return g_player_v2_result;}
 #include "render_v2.h"
 #include "cinema_subtitle.h"
 #include "palette_adjust.h"
+#include "render_autotest.h"
 
 #include <fileioc.h>
 #include <graphx.h>
@@ -18,6 +19,10 @@ player_v2_result_t player_v2_last_result(void){return g_player_v2_result;}
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#ifndef CINEMA_AUTO_TEST
+#define CINEMA_AUTO_TEST 0
+#endif
 
 /* 2, not 4: frames are no longer bit-packed (see frame_slot_t below),
  * so each slot's buffer doubled in size. Halving the slot count keeps
@@ -234,6 +239,14 @@ typedef struct player_v2_t {
     uint8_t subtitle_style;
     uint8_t subtitle_size_mode;
     uint8_t subtitle_position;
+#if CINEMA_AUTO_TEST
+    cinema_autotest_result_t renderer_test;
+    uint32_t subtitle_test_ticks[2];
+    uint8_t subtitle_test_matches;
+    uint8_t raw8_renderer;        /* 0 GraphX, 1 C, 2 ASM */
+    uint8_t packed4_renderer;     /* 0 original, 1 dual, 2 unrolled, 3 LUT */
+    bool subtitle_cache_enabled; /* fallback to original GraphX if mismatch */
+#endif
 } player_v2_t;
 
 /* Callback only records what happened -- no graphics calls, no printing,
@@ -1075,7 +1088,7 @@ static bool subtitle_locate(player_v2_t *player,uint32_t frame)
 #define CINEMA_SUBTITLE_CACHE 1
 #endif
 
-#if CINEMA_SUBTITLE_CACHE
+#if CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST
 /* Compact text bitmap cache: 30 characters * 8 rows * 2 lines = 480 B.
  * 8-bit sprites would need about 4.8 KiB, which exceeds the calculator's
  * BSS/heap ceiling alongside three full USB slot buffers. A bitmask keeps
@@ -1163,7 +1176,7 @@ static void subtitle_update_cache(player_v2_t *player)
 
 /* Keep the original GraphX text path available for real-device A/B checks:
  * sprite-cache speed/visual appearance has not yet been physically proven. */
-#endif /* CINEMA_SUBTITLE_CACHE */
+#endif /* CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST */
 static void draw_centered_subtitle_line(player_v2_t *player,const char *text,
                                        uint8_t line_index,uint8_t y)
 {
@@ -1177,10 +1190,20 @@ static void draw_centered_subtitle_line(player_v2_t *player,const char *text,
         gfx_SetColor(player->osd_bg);
         gfx_FillRectangle_NoClip(box_x,y>pad?y-pad:0,box_w,8u+2u*pad);
     }
-#if CINEMA_SUBTITLE_CACHE
+#if CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST
+#if CINEMA_AUTO_TEST
+    if (player->subtitle_cache_enabled)
+#endif
+    {
     subtitle_draw_cached_line(line_index, (uint8_t)strlen(text), (uint16_t)x, y,
                               player->osd_fg, player->osd_bg, player->subtitle_style);
-#else
+    }
+#endif
+#if !CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST
+#if CINEMA_AUTO_TEST
+    if (!player->subtitle_cache_enabled)
+#endif
+    {
     (void)line_index;
     if(player->subtitle_style==SUB_STYLE_TEXT || player->subtitle_style==SUB_STYLE_OUTLINE){
         gfx_SetTextFGColor(player->osd_bg);
@@ -1195,6 +1218,7 @@ static void draw_centered_subtitle_line(player_v2_t *player,const char *text,
     }
     gfx_SetTextFGColor(player->osd_fg);
     gfx_PrintStringXY(text,x,y);
+    }
 #endif
 }
 
@@ -1211,7 +1235,10 @@ static void draw_subtitle(player_v2_t *player,uint32_t frame)
                          player->fps_den,player->subtitle_delay_ms))return;
     if(!subtitle_locate(player,lookup))return;
     cue=&player->subtitle_cue;
-#if CINEMA_SUBTITLE_CACHE
+#if CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST
+#if CINEMA_AUTO_TEST
+    if (player->subtitle_cache_enabled)
+#endif
     subtitle_update_cache(player);
 #endif
     if(player->subtitle_position==SUB_POS_TOP){y1=V2_Y_OFFSET+4u;y2=V2_Y_OFFSET+14u;}
@@ -1281,6 +1308,117 @@ static void subtitle_options_menu(player_v2_t *player)
     }
 }
 
+#if CINEMA_AUTO_TEST
+/* One-install mode: the first prefetched movie frame is fed through every
+ * renderer before playback starts. Every implementation must exactly match
+ * the byte-for-byte VRAM result of the original/GraphX control. All drawn
+ * frames and checksums stay on the nonvisible GraphX buffer. */
+static uint32_t autotest_clock_now(void *unused)
+{
+    (void)unused;
+    return (uint32_t)clock();
+}
+static void autotest_raw_graphx(const uint8_t *src)
+{ render_scaled_graphx((const struct gfx_sprite_t *)(src - 2)); }
+static void autotest_raw_c(const uint8_t *src)
+{ render_scaled_fixed_c(src); }
+static void autotest_raw_asm(const uint8_t *src)
+{ render_scaled_fixed_asm(src); }
+static const cinema_autotest_draw_t autotest_raw_candidates[3] = {
+    autotest_raw_graphx, autotest_raw_c, autotest_raw_asm
+};
+static const cinema_autotest_draw_t autotest_packed_candidates[4] = {
+    render_scaled_packed4_asm, render_scaled_packed4_dual_asm,
+    render_scaled_packed4_unrolled_asm, render_scaled_packed4_lut_asm
+};
+
+/* The legacy font path is independently available in this build. Test both
+ * paths with synthetic two-line text in every style; on a pixel mismatch
+ * keep the legacy path. No actual cue or subtitle-file data is consumed. */
+static player_v2_t *g_autotest_sub_player;
+static void autotest_subtitle_legacy(const uint8_t *unused)
+{
+    player_v2_t *player = g_autotest_sub_player;
+    (void)unused;
+    player->subtitle_cache_enabled = false;
+    draw_centered_subtitle_line(player, player->subtitle_cue.line1, 0u, 171u);
+    draw_centered_subtitle_line(player, player->subtitle_cue.line2, 1u, 182u);
+}
+static void autotest_subtitle_cached(const uint8_t *unused)
+{
+    player_v2_t *player = g_autotest_sub_player;
+    (void)unused;
+    player->subtitle_cache_enabled = true;
+    subtitle_update_cache(player);
+    draw_centered_subtitle_line(player, player->subtitle_cue.line1, 0u, 171u);
+    draw_centered_subtitle_line(player, player->subtitle_cue.line2, 1u, 182u);
+}
+static const cinema_autotest_draw_t autotest_sub_candidates[2] = {
+    autotest_subtitle_legacy, autotest_subtitle_cached
+};
+
+static void player_v2_run_autotest(player_v2_t *player)
+{
+    const gfx_sprite_t *sprite = slot_sprite(&player->slots[0]);
+    const uint8_t *frame = sprite->data;
+    uint8_t *target = (uint8_t *)gfx_vbuffer;
+    const size_t target_bytes = (size_t)GFX_LCD_WIDTH * GFX_LCD_HEIGHT;
+
+    if (player->format_flags & CIN2_FLAG_PACKED4) {
+        player->renderer_test = cinema_autotest_run(autotest_packed_candidates,
+            4u, frame, target, target_bytes, autotest_clock_now, NULL);
+        player->packed4_renderer = player->renderer_test.selected;
+    } else {
+        player->renderer_test = cinema_autotest_run(autotest_raw_candidates,
+            3u, frame, target, target_bytes, autotest_clock_now, NULL);
+        player->raw8_renderer = player->renderer_test.selected;
+    }
+
+    player->subtitle_test_matches = 0u;
+    player->subtitle_cache_enabled = false;
+    if (player->subtitle_available) {
+        bool all_match = true;
+        uint8_t style;
+        uint8_t old_fg = gfx_SetTextFGColor(player->osd_fg);
+        uint8_t old_bg = gfx_SetTextBGColor(player->osd_bg);
+
+        g_autotest_sub_player = player;
+        memset(&player->subtitle_cue, 0, sizeof(player->subtitle_cue));
+        strcpy(player->subtitle_cue.line1, "Cinema");
+        strcpy(player->subtitle_cue.line2, "Subtitle");
+        player->subtitle_cue.line_count = 2;
+        player->subtitle_cue_index = 0;
+        for (style = 0u; style < 4u; ++style) {
+            cinema_autotest_result_t result;
+            player->subtitle_style = style;
+            g_sub_cached_index = -1;
+            result = cinema_autotest_run(autotest_sub_candidates, 2u,
+                (const uint8_t *)player->subtitle_cue.line1,
+                target, target_bytes, autotest_clock_now, NULL);
+            player->subtitle_test_ticks[0] += result.ticks[0];
+            player->subtitle_test_ticks[1] += result.ticks[1];
+            if ((result.valid_mask & 2u) == 0u) all_match = false;
+        }
+        player->subtitle_test_matches = all_match ? 1u : 0u;
+        player->subtitle_cache_enabled = all_match &&
+            player->subtitle_test_ticks[0] >= 16u &&
+            (uint64_t)player->subtitle_test_ticks[1] * 100u <
+            (uint64_t)player->subtitle_test_ticks[0] * 93u;
+        gfx_SetTextFGColor(old_fg);
+        gfx_SetTextBGColor(old_bg);
+        memset(&player->subtitle_cue, 0, sizeof(player->subtitle_cue));
+        player->subtitle_style = SUB_STYLE_BOX;
+        subtitle_invalidate_cue(player);
+        g_sub_cached_index = -1;
+        g_autotest_sub_player = NULL;
+    }
+    /* Benchmarks leave only the nonvisible buffer touched. Playback starts
+     * from clean front/back buffers; neither starts the movie scheduler nor
+     * changes the just-prefetched USB frame slots. */
+    gfx_ZeroScreen();
+}
+#endif
+
 static void render_frame(player_v2_t *player, frame_slot_t *slot)
 {
     clock_t decode_start = clock();
@@ -1298,7 +1436,24 @@ static void render_frame(player_v2_t *player, frame_slot_t *slot)
      * one Cinema's v1 (legacy) player uses successfully at this exact
      * scale factor); CINEMA_RENDERER_FIXED_C/_FIXED_ASM are Cinema's own
      * specialized replacements, opt-in via the Makefile. */
-#if CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
+#if CINEMA_AUTO_TEST
+    if (player->format_flags & CIN2_FLAG_PACKED4) {
+        const uint8_t *packed = slot_sprite(slot)->data
+            + (uint32_t)slot->present_index * CINEMA_V2_WIDTH * CINEMA_V2_HEIGHT / 2u;
+        switch (player->packed4_renderer) {
+            case 1: render_scaled_packed4_dual_asm(packed); break;
+            case 2: render_scaled_packed4_unrolled_asm(packed); break;
+            case 3: render_scaled_packed4_lut_asm(packed); break;
+            default: render_scaled_packed4_asm(packed); break;
+        }
+    } else {
+        switch (player->raw8_renderer) {
+            case 1: render_scaled_fixed_c(slot_sprite(slot)->data); break;
+            case 2: render_scaled_fixed_asm(slot_sprite(slot)->data); break;
+            default: render_scaled_graphx((const struct gfx_sprite_t *)slot_sprite(slot)); break;
+        }
+    }
+#elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_C
     render_scaled_fixed_c(slot_sprite(slot)->data);
 #elif CINEMA_RENDERER == CINEMA_RENDERER_FIXED_ASM
     if (player->format_flags & CIN2_FLAG_PACKED4) {
@@ -1443,7 +1598,7 @@ static bool save_resume_state(const player_v2_t *player)
 #ifdef CINEMA_DIAGNOSTIC
 static void diagnostic_wait_key(void)
 {
-#if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM
+#if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM || defined(CINEMA_SIMULATION)
     /* Host simulations do not provide an interactive post-playback key.
      * Do not block their deterministic test sequence. The physical
      * fixed-ASM calculator build retains full release/press/release
@@ -1459,6 +1614,48 @@ static void diagnostic_wait_key(void)
 static void print_playback_summary(const player_v2_t *player)
 {
     char buffer[64];
+#if CINEMA_AUTO_TEST
+    {
+        static const char *const raw_names[3] = {"GRAPHX", "FIXED C", "FIXED ASM"};
+        static const char *const p4_names[4] = {"ORIGINAL", "DUAL ROW", "UNROLLED", "LUT"};
+        uint8_t i;
+        uint32_t actual10 = 0;
+        uint32_t target10 = (uint32_t)(((uint64_t)player->fps_num * 10u) / player->fps_den);
+        if (player->session_frames_presented && clock() > player->playback_start_tick) {
+            uint32_t active = (uint32_t)(clock() - player->playback_start_tick
+                                - player->accumulated_pause_ticks);
+            if (!active) active = 1;
+            actual10 = (uint32_t)(((uint64_t)player->session_frames_presented
+                                   * 10u * CLOCKS_PER_SEC) / active);
+        }
+        os_ClrHome();
+        putstr("CINEMA AUTO TEST");
+        for (i = 0; i < player->renderer_test.count; ++i) {
+            const char *name = (player->format_flags & CIN2_FLAG_PACKED4)
+                ? p4_names[i] : raw_names[i];
+            sprintf(buffer, "%s %lu %s", name,
+                (unsigned long)player->renderer_test.ticks[i],
+                (player->renderer_test.valid_mask & (1u << i)) ? "OK" : "DIFF");
+            putstr(buffer);
+        }
+        sprintf(buffer, "BEST %s",
+            (player->format_flags & CIN2_FLAG_PACKED4)
+                ? p4_names[player->packed4_renderer] : raw_names[player->raw8_renderer]);
+        putstr(buffer);
+        if (player->subtitle_available) {
+            sprintf(buffer, "SUB %s %s", player->subtitle_test_matches ? "MATCH" : "DIFF",
+                player->subtitle_cache_enabled ? "CACHE" : "GRAPHX");
+            putstr(buffer);
+        } else putstr("SUB not loaded");
+        sprintf(buffer, "FPS %lu.%lu/%lu.%lu drop %lu", (unsigned long)(actual10 / 10u),
+            (unsigned long)(actual10 % 10u), (unsigned long)(target10 / 10u),
+            (unsigned long)(target10 % 10u), (unsigned long)player->dropped_frames);
+        putstr(buffer);
+        putstr("Press key to finish");
+        diagnostic_wait_key();
+        return;
+    }
+#else
     uint32_t active = 1;
     uint32_t actual10 = 0;
     uint32_t target10 = (uint32_t)(((uint64_t)player->fps_num * 10u) / player->fps_den);
@@ -1718,6 +1915,7 @@ static void print_playback_summary(const player_v2_t *player)
         puts("Key: exit");
         diagnostic_wait_key();
     }
+#endif
 #endif
 }
 #endif /* CINEMA_DIAGNOSTIC */
@@ -2109,8 +2307,11 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
     player.format_flags = header->flags;
     player.frame_sectors = (uint8_t)cin2_frame_sectors(header->flags);
     player.subtitle_map=g_next_subtitle_map;player.subtitle_size=g_next_subtitle_size;
-#if CINEMA_SUBTITLE_CACHE
+#if CINEMA_SUBTITLE_CACHE || CINEMA_AUTO_TEST
     g_sub_cached_index=-1;
+#endif
+#if CINEMA_AUTO_TEST
+    player.subtitle_cache_enabled = true;
 #endif
     player.subtitle_sector=g_next_subtitle_sector;
     player.subtitle_movie_id=g_next_subtitle_movie_id;player.subtitles_enabled=g_next_subtitles_enabled;
@@ -2199,6 +2400,10 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
         gfx_SwapDraw();
         gfx_SetDrawBuffer();
         gfx_ZeroScreen();
+
+#if CINEMA_AUTO_TEST
+        player_v2_run_autotest(&player);
+#endif
 
         player.start_tick = clock();
         player.playback_start_tick = player.start_tick;

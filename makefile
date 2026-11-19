@@ -37,6 +37,20 @@ CINEMA_RENDERER ?= graphx
 # dual, unrolled, or lut without editing production source.
 CINEMA_PACKED4_VARIANT ?= original
 CINEMA_SUBTITLE_CACHE ?= on
+# One-install hardware shootout: benchmarks every compiled renderer on the
+# first prefetched movie frame, checks output equivalence, and uses the
+# fastest valid variant (with a conservative timing margin). Also A/B
+# checks legacy GraphX subtitle text against cached glyph rendering.
+CINEMA_AUTO_TEST ?= off
+ifeq ($(CINEMA_AUTO_TEST),on)
+ifneq ($(CINEMA_RENDERER),fixed_asm)
+$(error CINEMA_AUTO_TEST=on requires CINEMA_RENDERER=fixed_asm)
+endif
+CFLAGS += -DCINEMA_AUTO_TEST=1 -DCINEMA_DIAGNOSTIC=1
+LTOFLAGS += -DCINEMA_AUTO_TEST=1 -DCINEMA_DIAGNOSTIC=1
+else ifneq ($(CINEMA_AUTO_TEST),off)
+$(error Unknown CINEMA_AUTO_TEST '$(CINEMA_AUTO_TEST)' -- use on or off)
+endif
 ifeq ($(CINEMA_SUBTITLE_CACHE),off)
 CFLAGS += -DCINEMA_SUBTITLE_CACHE=0
 LTOFLAGS += -DCINEMA_SUBTITLE_CACHE=0

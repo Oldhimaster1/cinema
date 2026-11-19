@@ -90,6 +90,18 @@ test_player_v2_sim_fixed_c_integration() {
     timeout 30 "$TMP/test_player_v2_sim_fixed_c_integration"
 }
 
+test_player_v2_autotest_integration() {
+    $CC $STUB_CFLAGS -Wl,--wrap=clock \
+        -DCINEMA_RENDERER=CINEMA_RENDERER_FIXED_ASM \
+        -DCINEMA_AUTO_TEST=1 -DCINEMA_SIMULATION=1 -DCINEMA_DIAGNOSTIC=1 \
+        src/player_v2.c src/render_autotest.c src/cin2.c src/msd_util.c \
+        src/fat32ro.c src/render_v2.c src/cinema_subtitle.c \
+        src/cinema_codec.c src/palette_adjust.c tests/stub_impl_sim.c \
+        tests/stub_auto_asm.c tests/test_player_v2_auto_sim.c \
+        -o "$TMP/test_player_v2_autotest_integration"
+    timeout 30 "$TMP/test_player_v2_autotest_integration"
+}
+
 test_fat32ro() {
     $CC $CFLAGS -o "$TMP/test_fat32ro" tests/test_fat32ro.c src/fat32ro.c
     "$TMP/test_fat32ro"
@@ -98,6 +110,12 @@ test_fat32ro() {
 test_render_v2() {
     $CC $STUB_CFLAGS -o "$TMP/test_render_v2" tests/test_render_v2.c src/render_v2.c
     "$TMP/test_render_v2"
+}
+
+test_renderer_autotest() {
+    $CC $CFLAGS -Isrc -o "$TMP/test_renderer_autotest" \
+        tests/test_render_autotest.c src/render_autotest.c
+    "$TMP/test_renderer_autotest"
 }
 
 test_palette_adjust() {
@@ -133,12 +151,14 @@ run_step "cin2.c host unit tests"                   test_cin2
 run_step "placement fast-map adapter tests"          test_placement_map
 run_step "fat32ro.c host unit tests"                test_fat32ro
 run_step "render_v2.c fixed-scale pixel correctness" test_render_v2
+run_step "auto renderer pixel equivalence and safe selection" test_renderer_autotest
 run_step "full 32K RGB1555 palette adjustment domain" test_palette_adjust
 run_step "settings backward compatibility + CRC" test_settings
 run_step "streamed CSU larger than 64 KiB"           test_csu_stream
 run_step "structural link against stub CE headers"  test_structural_link
 run_step "player_v2 end-to-end simulation"           test_player_v2_sim
 run_step "player_v2 sim w/ fixed-C renderer"         test_player_v2_sim_fixed_c_integration
+run_step "one-install automatic benchmark end-to-end" test_player_v2_autotest_integration
 run_step "player_v1 end-to-end simulation"           test_player_v1_sim
 run_step "Python encoder tests"                      test_encoder
 
