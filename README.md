@@ -14,6 +14,9 @@
 > summary screen. No seven-binary install or manual switching is needed.
 > Read [the auto-test instructions](docs/UPGRADE_EXPERIMENTS.md#recommended-one-install-automatic-test)
 > before trying it; real hardware confirmation is still pending.
+> The first auto-test binary exceeded CEdev's uncompressed runtime limit;
+> use the updated **32,643-byte** binary with an enforced 64-KiB code check.
+> This test build supports CIN2 v2 only; use the Beta 1 release for legacy v1.
 
 Cinema is a USB video player for the TI-84 Plus CE. It plays videos converted to the CIN2 format from compatible FAT32 USB storage.
 

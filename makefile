@@ -10,13 +10,26 @@ COMPRESSED = YES
 # -O3, not the CE default -Oz. Cinema is a real-time video player: the
 # per-frame decode/blit and the USB service loop are the whole product,
 # and -Oz (optimize for minimum *size*) costs speed for bytes we have
-# plenty of -- an .8xp a few KB larger is free, dropped frames are not.
+# plenty of in ordinary builds -- dropped frames are not free. The compact
+# auto-test below is an exception: its earlier runtime image exceeded CEdev's
+# 64-KiB code budget even though the compressed .8xp was small.
 # LTOFLAGS must be set too: CEdev's makefile.mk defaults it to $(CFLAGS),
 # but the LTO recompile is where the hot loops actually get their final
 # codegen, so leaving it at -Oz would undo most of this.
 CFLAGS = -Wall -Wextra -O3
 CXXFLAGS = -Wall -Wextra -O3
 LTOFLAGS = -Wall -Wextra -O3
+
+# The auto-test is also a real calculator executable, so code size matters
+# after decompression. Keep the handwritten hot-path assembly unchanged,
+# but compile its control-flow code for size to fit CEdev's 64-KiB limit.
+CINEMA_AUTO_TEST ?= off
+ifeq ($(CINEMA_AUTO_TEST),on)
+CFLAGS = -Wall -Wextra -Oz
+CXXFLAGS = -Wall -Wextra -Oz
+LTOFLAGS = -Wall -Wextra -Oz
+PREFER_OS_CRT = YES
+endif
 
 # Which renderer src/player_v2.c uses for its per-frame 160x96->320x192
 # 2x scale-up -- see src/render_v2.h for what each one is.
@@ -41,13 +54,12 @@ CINEMA_SUBTITLE_CACHE ?= on
 # first prefetched movie frame, checks output equivalence, and uses the
 # fastest valid variant (with a conservative timing margin). Also A/B
 # checks legacy GraphX subtitle text against cached glyph rendering.
-CINEMA_AUTO_TEST ?= off
 ifeq ($(CINEMA_AUTO_TEST),on)
 ifneq ($(CINEMA_RENDERER),fixed_asm)
 $(error CINEMA_AUTO_TEST=on requires CINEMA_RENDERER=fixed_asm)
 endif
-CFLAGS += -DCINEMA_AUTO_TEST=1 -DCINEMA_DIAGNOSTIC=1
-LTOFLAGS += -DCINEMA_AUTO_TEST=1 -DCINEMA_DIAGNOSTIC=1
+CFLAGS += -DCINEMA_AUTO_TEST=1
+LTOFLAGS += -DCINEMA_AUTO_TEST=1
 else ifneq ($(CINEMA_AUTO_TEST),off)
 $(error Unknown CINEMA_AUTO_TEST '$(CINEMA_AUTO_TEST)' -- use on or off)
 endif
@@ -70,6 +82,11 @@ else ifneq ($(CINEMA_PACKED4_VARIANT),original)
 $(error Unknown CINEMA_PACKED4_VARIANT '$(CINEMA_PACKED4_VARIANT)')
 endif
 CINEMA_BUILD ?= production
+ifeq ($(CINEMA_AUTO_TEST),on)
+ifneq ($(CINEMA_BUILD),production)
+$(error CINEMA_AUTO_TEST=on already has a compact report; use CINEMA_BUILD=production)
+endif
+endif
 ifeq ($(CINEMA_BUILD),diagnostic)
 CFLAGS += -DCINEMA_DIAGNOSTIC=1
 CXXFLAGS += -DCINEMA_DIAGNOSTIC=1
@@ -93,3 +110,10 @@ endif
 # ----------------------------
 
 include $(shell cedev-config --makefile)
+
+ifeq ($(CINEMA_AUTO_TEST),on)
+.PHONY: check-ce-memory
+check-ce-memory: $(BINDIR)/$(NAME).8xp
+	python3 tools/check_ce_memory.py $(BINDIR)/$(NAME).map
+target: check-ce-memory
+endif

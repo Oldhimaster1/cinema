@@ -49,6 +49,23 @@ leave Packed4 off unless the calculator is using a `fixed_asm` build.
 
 ### Recommended: one-install automatic test
 
+**Important memory correction (November 19, 2026):** The first auto-test
+binary was mistakenly shipped at only 53,916 bytes **compressed**, while its
+uncompressed executable occupied **130,512 bytes**. CEdev v15 documents a
+64-KiB runtime code/data limit. This could result in TI-OS `ERROR: MEMORY`
+even after a RAM reset, because clearing RAM cannot shrink a linked program.
+**Do not install that earlier binary again.**
+
+The corrected auto-test uses `-Oz`, ROM-backed CRT routines, and a small
+integer/string formatter instead of the large `printf` formatter. It also
+omits *legacy v1 playback only in the experimental auto-test binary*; Beta 1
+and normal production builds keep v1 support. The corrected auto-test's
+uncompressed program is **63,947 bytes**, with 1,589 bytes of code-budget
+headroom; its transferable `.8xp` is **32,643 bytes**. Every auto-test build
+now runs `tools/check_ce_memory.py` against its linker map and fails if the
+64-KiB budget is exceeded. An ordinary RAM clear is not a remedy for an
+oversized executable. Actual hardware launch still needs confirmation.
+
 ```sh
 make -B CINEMA_RENDERER=fixed_asm CINEMA_AUTO_TEST=on
 ```

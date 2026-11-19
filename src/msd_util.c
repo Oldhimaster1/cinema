@@ -3,6 +3,11 @@
 
 #include <stdio.h>
 
+#if CINEMA_AUTO_TEST
+#include "cinema_tinyfmt.h"
+#define sprintf cinema_sprintf
+#endif
+
 void put_msd_error(msd_error_t error, const char *context)
 {
     char buffer[64];

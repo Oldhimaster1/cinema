@@ -23,6 +23,11 @@ player_v2_result_t player_v2_last_result(void){return g_player_v2_result;}
 #ifndef CINEMA_AUTO_TEST
 #define CINEMA_AUTO_TEST 0
 #endif
+#if CINEMA_AUTO_TEST
+#include "cinema_tinyfmt.h"
+#define sprintf cinema_sprintf
+#define snprintf cinema_snprintf
+#endif
 
 /* 2, not 4: frames are no longer bit-packed (see frame_slot_t below),
  * so each slot's buffer doubled in size. Halving the slot count keeps
@@ -1595,7 +1600,7 @@ static bool save_resume_state(const player_v2_t *player)
     return false;
 }
 
-#ifdef CINEMA_DIAGNOSTIC
+#if defined(CINEMA_DIAGNOSTIC) || CINEMA_AUTO_TEST
 static void diagnostic_wait_key(void)
 {
 #if CINEMA_RENDERER != CINEMA_RENDERER_FIXED_ASM || defined(CINEMA_SIMULATION)
@@ -1918,7 +1923,7 @@ static void print_playback_summary(const player_v2_t *player)
 #endif
 #endif
 }
-#endif /* CINEMA_DIAGNOSTIC */
+#endif /* CINEMA_DIAGNOSTIC || CINEMA_AUTO_TEST */
 
 /* True once the last frame of the movie has been presented. */
 static bool playback_finished(const player_v2_t *player)
@@ -2422,7 +2427,7 @@ bool player_v2_run(global_t *global, const cin2_header_t *header,
         gfx_End();
     }
 
-#ifdef CINEMA_DIAGNOSTIC
+#if defined(CINEMA_DIAGNOSTIC) || CINEMA_AUTO_TEST
     print_playback_summary(&player);
 #endif
 

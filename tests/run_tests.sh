@@ -93,8 +93,9 @@ test_player_v2_sim_fixed_c_integration() {
 test_player_v2_autotest_integration() {
     $CC $STUB_CFLAGS -Wl,--wrap=clock \
         -DCINEMA_RENDERER=CINEMA_RENDERER_FIXED_ASM \
-        -DCINEMA_AUTO_TEST=1 -DCINEMA_SIMULATION=1 -DCINEMA_DIAGNOSTIC=1 \
-        src/player_v2.c src/render_autotest.c src/cin2.c src/msd_util.c \
+        -DCINEMA_AUTO_TEST=1 -DCINEMA_SIMULATION=1 \
+        src/player_v2.c src/render_autotest.c src/cinema_tinyfmt.c \
+        src/cin2.c src/msd_util.c \
         src/fat32ro.c src/render_v2.c src/cinema_subtitle.c \
         src/cinema_codec.c src/palette_adjust.c tests/stub_impl_sim.c \
         tests/stub_auto_asm.c tests/test_player_v2_auto_sim.c \
@@ -116,6 +117,12 @@ test_renderer_autotest() {
     $CC $CFLAGS -Isrc -o "$TMP/test_renderer_autotest" \
         tests/test_render_autotest.c src/render_autotest.c
     "$TMP/test_renderer_autotest"
+}
+
+test_tinyfmt() {
+    $CC $CFLAGS -Isrc -o "$TMP/test_tinyfmt" \
+        tests/test_cinema_tinyfmt.c src/cinema_tinyfmt.c
+    "$TMP/test_tinyfmt"
 }
 
 test_palette_adjust() {
@@ -142,6 +149,7 @@ test_encoder() {
     python3 -m pytest -q tests/test_cin2_format.py tests/test_encode_cin2.py \
         tests/test_aspect_ratio.py tests/test_quality_modes.py \
         tests/test_packed5_lab.py tests/test_converter_gui.py \
+        tests/test_ce_memory_budget.py \
         tests/test_fixtures.py tests/test_frame_rate_boundaries.py \
         tests/test_fuzz_cin2_header.py tests/test_reliability_regressions.py \
         tests/test_csu.py tests/test_subtitle_authoring.py tests/test_scheduler_math.py
@@ -152,6 +160,7 @@ run_step "placement fast-map adapter tests"          test_placement_map
 run_step "fat32ro.c host unit tests"                test_fat32ro
 run_step "render_v2.c fixed-scale pixel correctness" test_render_v2
 run_step "auto renderer pixel equivalence and safe selection" test_renderer_autotest
+run_step "compact formatter vs libc: 20K cases"     test_tinyfmt
 run_step "full 32K RGB1555 palette adjustment domain" test_palette_adjust
 run_step "settings backward compatibility + CRC" test_settings
 run_step "streamed CSU larger than 64 KiB"           test_csu_stream

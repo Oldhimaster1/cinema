@@ -20,6 +20,12 @@
 #include <string.h>
 #include <time.h>
 
+#if CINEMA_AUTO_TEST
+#include "cinema_tinyfmt.h"
+#define sprintf cinema_sprintf
+#define snprintf cinema_snprintf
+#endif
+
 #define BROWSER_MAX_FILES     32
 #define BROWSER_VISIBLE_ROWS   7
 #define BROWSER_DURATION_LEN   16
@@ -208,6 +214,7 @@ static bool has_playable_extension(const char *name)
  * Otherwise returns 0 (start of movie). Mirrors the original Cinema's
  * inline resume menu exactly -- same appvar, same 4-byte raw-LBA
  * format, same prompt -- so existing v1 resume state keeps working. */
+#if !CINEMA_AUTO_TEST
 static uint32_t v1_resume_menu(void)
 {
     uint32_t start_lba = 0;
@@ -233,6 +240,7 @@ static uint32_t v1_resume_menu(void)
 
     return start_lba;
 }
+#endif
 
 /* Same idea as v1_resume_menu but for the v2 (CIN2) resume record. Only
  * offers to resume if a record exists, parses successfully, was saved
@@ -1135,6 +1143,11 @@ int main(void)
         }
         else
         {
+#if CINEMA_AUTO_TEST
+            /* The compact self-test binary targets CIN2 v2 only. The
+             * released Beta 1 executable retains its v1 compatibility. */
+            putstr("Legacy v1: use Beta 1");
+#else
             os_ClrHome();
             putstr("Cinema v1 (legacy) drive detected");
             /* Diagnostic dump for whenever this fallback is reached
@@ -1157,6 +1170,7 @@ int main(void)
                 uint32_t start_lba = v1_resume_menu();
                 player_ok = player_v1_run(&global, start_lba);
             }
+#endif
         }
     }
 
