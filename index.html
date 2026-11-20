@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111725">
+  <meta name="description" content="Turn videos into movies for Cinema on your TI-84 Plus CE. Works right in your browser.">
+  <title>Cinema · Video Converter</title>
+  <link rel="stylesheet" href="./converter/styles.css">
+  <script type="module" src="./converter/app.mjs"></script>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand"><span class="mark" aria-hidden="true">▶</span><span>Cinema</span></div>
+      <a class="github-link" href="https://github.com/Oldhimaster1/cinema" target="_blank" rel="noopener noreferrer">View on GitHub <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div class="eyebrow"><span class="green-dot"></span> Free · Runs in your browser</div>
+        <h1 id="page-title">Your videos.<br><span>Your calculator.</span></h1>
+        <p>Make a movie file for Cinema on your TI-84 Plus CE. Choose a video, adjust a few things, and save it to your flash drive.</p>
+      </section>
+
+      <div class="layout">
+        <section class="panel converter" aria-labelledby="converter-title">
+          <div class="panel-heading"><span class="step">01</span><h2 id="converter-title">Choose your video</h2></div>
+          <label id="drop-area" class="drop-area" for="video-file">
+            <span class="upload-icon" aria-hidden="true">↑</span>
+            <span class="drop-title" id="drop-title">Drop a video here, or browse</span>
+            <span class="drop-subtitle" id="drop-subtitle">MP4, MOV, WebM, and other supported videos</span>
+            <input id="video-file" type="file" accept="video/*,.mkv,.mov,.webm" aria-label="Choose a video">
+          </label>
+
+          <div class="panel-heading settings-heading"><span class="step">02</span><h2>Make it yours</h2></div>
+          <div class="setting-grid">
+            <label class="field">
+              <span>Motion</span>
+              <select id="fps">
+                <option value="15">Standard · 15 FPS</option>
+                <option value="18" selected>Smooth · 18 FPS</option>
+                <option value="20">Extra smooth · 20 FPS</option>
+                <option value="24">Experimental · 24 FPS</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Picture fit</span>
+              <select id="fit">
+                <option value="contain" selected>Show the whole picture</option>
+                <option value="cover">Fill the screen</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Color style</span>
+              <select id="dither">
+                <option value="clean" selected>Clean</option>
+                <option value="stable">More texture</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Subtitles <small>(optional)</small></span>
+              <input id="subtitle-file" type="file" accept=".srt,text/plain" aria-label="Choose subtitle file">
+            </label>
+          </div>
+
+          <p id="estimate" class="estimate" aria-live="polite">Choose a video to see its estimated movie size.</p>
+          <button id="convert" class="primary-button" type="button" disabled><span>Convert video</span><span aria-hidden="true">→</span></button>
+          <button id="cancel" class="text-button" type="button" hidden>Cancel conversion</button>
+
+          <div id="progress-area" class="progress-area" hidden>
+            <div class="progress-head"><span id="status" role="status" aria-live="polite">Getting ready…</span><span id="percent">0%</span></div>
+            <progress id="progress" max="100" value="0">0%</progress>
+          </div>
+          <div id="result" class="result" hidden aria-live="polite"></div>
+        </section>
+
+        <aside class="preview-panel" aria-label="Movie preview and instructions">
+          <div class="preview-top"><span>YOUR MOVIE</span><span class="preview-badge">160 × 96</span></div>
+          <div class="calculator">
+            <div class="calculator-title">TI-84 Plus CE</div>
+            <div class="screen-wrap"><canvas id="preview" width="160" height="96" aria-label="Preview of your converted movie"></canvas></div>
+            <div class="calculator-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          </div>
+          <p id="preview-caption" class="preview-caption">Your movie preview will appear here.</p>
+          <div class="help">
+            <h3>Ready to watch?</h3>
+            <ol>
+              <li>Save the movie file.</li>
+              <li>Copy it to a FAT32 flash drive. Copy the subtitle file too, if you added one.</li>
+              <li>Plug the drive into your calculator and open Cinema.</li>
+            </ol>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <footer>
+      <span>Made for Cinema on the TI-84 Plus CE.</span>
+      <span>No uploads. Movies contain video only, without sound.</span>
+    </footer>
+  </div>
+</body>
+</html>
