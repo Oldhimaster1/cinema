@@ -6,7 +6,8 @@ import {
 
 const $ = id => document.getElementById(id);
 const nodes = {
-  file: $('video-file'), subtitles: $('subtitle-file'), fps: $('fps'), fit: $('fit'),
+  file: $('video-file'), subtitles: $('subtitle-file'), removeSubtitles: $('remove-subtitles'),
+  fps: $('fps'), fit: $('fit'),
   dither: $('dither'), button: $('convert'), cancel: $('cancel'),
   progress: $('progress'), progressArea: $('progress-area'), percent: $('percent'),
   status: $('status'), estimate: $('estimate'), result: $('result'),
@@ -22,6 +23,7 @@ let cancelRequested = false;
 let resultUrl = null;
 let pickerUnavailable = false;
 let videoSelectionSerial = 0;
+let lastVideoFile = null;
 const BUFFERED_LIMIT = 128 * 1024 * 1024;
 const MAX_MOVIE_BYTES = 0xffffffff;
 
@@ -85,9 +87,20 @@ function estimateSettings() {
 
 async function chooseVideo(file) {
   if (converting || !file) return;
+  // Subtitles chosen for one movie should not follow the next movie.
+  // Keep them when the user only changes how the same video fits.
+  if (lastVideoFile && lastVideoFile !== file) {
+    nodes.subtitles.value = '';
+    nodes.removeSubtitles.hidden = true;
+  }
+  lastVideoFile = file;
   const selectionSerial = ++videoSelectionSerial;
   selected = null;
   nodes.button.disabled = true;
+  nodes.progressArea.hidden = true;
+  nodes.progress.value = 0;
+  nodes.estimate.textContent = 'Checking your video…';
+  if (resultUrl) { URL.revokeObjectURL(resultUrl); resultUrl = null; }
   clearMessage();
   nodes.dropTitle.textContent = file.name;
   nodes.dropSubtitle.textContent = 'Reading video details…';
@@ -123,7 +136,10 @@ async function chooseVideo(file) {
     if (selectionSerial !== videoSelectionSerial) return;
     nodes.dropSubtitle.textContent = 'Choose another video';
     nodes.previewCaption.textContent = 'Could not show a preview.';
-    message(error.message || String(error), true);
+    nodes.estimate.textContent = 'Choose another video to try again.';
+    const details = error.message || String(error);
+    message(/unsupported or unrecognizable format/i.test(details)
+      ? 'Cinema could not open that video. Try an MP4 with H.264 video.' : details, true);
   }
 }
 
@@ -221,7 +237,10 @@ async function startConversion() {
     const miniCanvas = document.createElement('canvas');
     miniCanvas.width = WIDTH; miniCanvas.height = HEIGHT;
     for await (const sample of paletteSink.samplesAtTimestamps(sampleTimes)) {
-      if (cancelRequested) throw new DOMException('Canceled', 'AbortError');
+      if (cancelRequested) {
+        sample?.close();
+        throw new DOMException('Canceled', 'AbortError');
+      }
       if (sample) {
         try { sampled.push(new Uint8ClampedArray(drawSample(sample, width, height, fit, miniCanvas))); }
         finally { sample.close(); }
@@ -256,7 +275,10 @@ async function startConversion() {
     let written = 0;
     const writeBatch = [];
     for await (const sample of streamingSink.samplesAtTimestamps(timestamps())) {
-      if (cancelRequested) throw new DOMException('Canceled', 'AbortError');
+      if (cancelRequested) {
+        sample?.close();
+        throw new DOMException('Canceled', 'AbortError');
+      }
       if (!sample) throw new Error(`Could not read frame ${written + 1} from the video.`);
       let rgba;
       try { rgba = drawSample(sample, width, height, fit, miniCanvas); }
@@ -312,6 +334,7 @@ async function startConversion() {
     if (writable) {
       try { await writable.abort(); } catch { /* avoid hiding the first error */ }
     }
+    nodes.progressArea.hidden = true;
     message(error.name === 'AbortError' ? 'Conversion canceled. No completed movie was saved.'
       : `Conversion stopped: ${error.message || String(error)}`, error.name !== 'AbortError');
   } finally {
@@ -323,6 +346,13 @@ async function startConversion() {
 }
 
 nodes.file.addEventListener('change', () => chooseVideo(nodes.file.files?.[0]));
+nodes.subtitles.addEventListener('change', () => {
+  nodes.removeSubtitles.hidden = !nodes.subtitles.files?.length;
+});
+nodes.removeSubtitles.addEventListener('click', () => {
+  nodes.subtitles.value = '';
+  nodes.removeSubtitles.hidden = true;
+});
 nodes.drop.addEventListener('dragover', event => { event.preventDefault(); nodes.drop.classList.add('dragging'); });
 nodes.drop.addEventListener('dragleave', () => nodes.drop.classList.remove('dragging'));
 nodes.drop.addEventListener('drop', event => {
