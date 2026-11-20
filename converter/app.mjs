@@ -20,6 +20,8 @@ let selected = null;
 let converting = false;
 let cancelRequested = false;
 let resultUrl = null;
+let pickerUnavailable = false;
+let videoSelectionSerial = 0;
 const BUFFERED_LIMIT = 128 * 1024 * 1024;
 const MAX_MOVIE_BYTES = 0xffffffff;
 
@@ -72,7 +74,7 @@ function estimateSettings() {
   const fps = Number(nodes.fps.value);
   const count = Math.round(selected.duration * fps);
   const bytes = expectedSize(count);
-  const noStreaming = typeof window.showSaveFilePicker !== 'function';
+  const noStreaming = pickerUnavailable || typeof window.showSaveFilePicker !== 'function';
   nodes.estimate.textContent = `About ${readableBytes(bytes)} · ${count.toLocaleString()} frames`
     + (fps >= 20 ? ' · Faster motion may not be smooth on every calculator.' : '')
     + (noStreaming && bytes > BUFFERED_LIMIT
@@ -83,6 +85,7 @@ function estimateSettings() {
 
 async function chooseVideo(file) {
   if (converting || !file) return;
+  const selectionSerial = ++videoSelectionSerial;
   selected = null;
   nodes.button.disabled = true;
   clearMessage();
@@ -100,10 +103,15 @@ async function chooseVideo(file) {
     const firstTimestamp = await track.getFirstTimestamp();
     const width = await track.getDisplayWidth();
     const height = await track.getDisplayHeight();
+    if (selectionSerial !== videoSelectionSerial) return;
     if (!Number.isFinite(duration) || duration <= 0 || !width || !height)
       throw new Error('Could not read the length or size of this video.');
     const sink = new VideoSampleSink(track);
     const sample = await sink.getSample(firstTimestamp + Math.min(duration / 4, 5));
+    if (selectionSerial !== videoSelectionSerial) {
+      sample?.close();
+      return;
+    }
     if (!sample) throw new Error('Could not decode a preview from this video.');
     try { drawSample(sample, width, height, nodes.fit.value); }
     finally { sample.close(); }
@@ -112,6 +120,7 @@ async function chooseVideo(file) {
     nodes.previewCaption.textContent = 'A glimpse of how your video will fit on the screen.';
     estimateSettings();
   } catch (error) {
+    if (selectionSerial !== videoSelectionSerial) return;
     nodes.dropSubtitle.textContent = 'Choose another video';
     nodes.previewCaption.textContent = 'Could not show a preview.';
     message(error.message || String(error), true);
@@ -152,10 +161,32 @@ async function startConversion() {
   const frames = Math.round(duration * fps);
   const bytes = expectedSize(frames);
   const filename = movieFilename(file.name);
-  const noStreaming = typeof window.showSaveFilePicker !== 'function';
+  let noStreaming = pickerUnavailable || typeof window.showSaveFilePicker !== 'function';
   if (!frames || bytes > MAX_MOVIE_BYTES || (noStreaming && bytes > BUFFERED_LIMIT)) {
     message('This movie is too large for the selected browser. Try a shorter clip or a desktop browser.', true);
     return;
+  }
+
+  let handle;
+  try {
+    /* Pick the destination before decoding: browsers require the picker to
+     * open while the Convert button's user gesture is still active. Do not
+     * await reading subtitle files before the user-activated picker. */
+    if (!noStreaming) {
+      handle = await window.showSaveFilePicker({ suggestedName: filename,
+        types: [{ description: 'Cinema movie', accept: { 'application/octet-stream': ['.bin'] } }] });
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') return; // User canceled on purpose.
+    /* Some browsers expose the picker but prohibit using it. For smaller
+     * clips, download through a Blob rather than stopping the conversion. */
+    if (bytes > BUFFERED_LIMIT) {
+      message('This browser cannot save a movie this large. Try Chrome or Edge on a computer.', true);
+      return;
+    }
+    pickerUnavailable = true;
+    noStreaming = true;
+    estimateSettings();
   }
 
   let subtitles = null;
@@ -166,19 +197,6 @@ async function startConversion() {
     }
   } catch (error) {
     message(`Please check your subtitle file: ${error.message}`, true);
-    return;
-  }
-
-  let handle;
-  try {
-    /* Pick the destination before decoding: browsers require the picker to
-     * open while the Convert button's user gesture is still active. */
-    if (!noStreaming) {
-      handle = await window.showSaveFilePicker({ suggestedName: filename,
-        types: [{ description: 'Cinema movie', accept: { 'application/octet-stream': ['.bin'] } }] });
-    }
-  } catch (error) {
-    if (error.name !== 'AbortError') message(`Could not choose a save location: ${error.message}`, true);
     return;
   }
 

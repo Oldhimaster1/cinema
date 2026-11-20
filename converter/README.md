@@ -6,7 +6,7 @@ The output is a 160 × 96, 16-color Packed4 `.BIN` movie. Optional `.srt` subtit
 
 ## Set up GitHub Pages
 
-In the repository's **Settings → Pages**, select **Deploy from a branch**, choose the `main` branch and the `/docs` folder, then save. If using the separate `gh-pages` branch instead, choose that branch and `/ (root)`.
+The site is published from the `gh-pages` branch, with its website files at the branch root. A copy also lives in `main` at the repository root. To change the source, open **Settings → Pages**, select **Deploy from a branch**, and choose the branch and `/ (root)` folder you intend to publish.
 
 The public website will normally appear at <https://oldhimaster1.github.io/cinema/> after Pages finishes deploying.
 
