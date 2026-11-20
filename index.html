@@ -7,7 +7,12 @@
   <meta name="description" content="Turn videos into movies for Cinema on your TI-84 Plus CE. Works right in your browser.">
   <title>Cinema · Video Converter</title>
   <link rel="stylesheet" href="./converter/styles.css?v=2">
-  <script type="module" src="./converter/app.mjs?v=2"></script>
+  <style>
+    .remove-subtitles { align-self: flex-start; border: 0; background: none; color: #9cc0ff; font-size: 11px; padding: 2px 0; cursor: pointer; }
+    .remove-subtitles:hover { text-decoration: underline; }
+    .remove-subtitles[hidden] { display: none; }
+  </style>
+  <script type="module" src="./converter/app.mjs?v=3"></script>
 </head>
 <body>
   <div class="page">
@@ -58,10 +63,11 @@
                 <option value="stable">More texture</option>
               </select>
             </label>
-            <label class="field">
-              <span>Subtitles <small>(optional)</small></span>
+            <div class="field">
+              <label for="subtitle-file">Subtitles <small>(optional)</small></label>
               <input id="subtitle-file" type="file" accept=".srt,text/plain" aria-label="Choose subtitle file">
-            </label>
+              <button id="remove-subtitles" class="remove-subtitles" type="button" hidden>Remove subtitles</button>
+            </div>
           </div>
 
           <p id="estimate" class="estimate" aria-live="polite">Choose a video to see its estimated movie size.</p>
